@@ -9,6 +9,8 @@
  * phone must not read "Mo., 3. März" beside an English "Today".
  */
 
+import { deviceUses24HourClock } from './locale';
+
 /** Minutes elapsed -> "2 min ago". */
 export function relTime(minutes: number): string {
   const m = Math.max(0, Math.round(minutes));
@@ -103,9 +105,23 @@ export function formatPhone(e164: string): string {
   return `+${code} ${groupNational(digits.slice(code.length))}`;
 }
 
+/** Like the server's call log (web calls/format.ts fmtDuration): '47s', '3m 05s'. */
 export function formatDuration(seconds: number): string {
   const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s}s`;
   return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+}
+
+/**
+ * The duration a call row or the call header shows, or '' when it would say
+ * nothing: while the call is live (its length stays 0 until it ends) and for a
+ * call that never connected. Home and the call detail get only the server's
+ * text, so a zero is read from it: '0s' from the call log and `formatDuration`,
+ * '0m 00s' from the overview of an older server.
+ */
+export function callDuration(label: string, bucket: StatusBucket): string {
+  if (bucket === 'active') return '';
+  return /^0(m 00)?s$/.test(label.trim()) ? '' : label;
 }
 
 /** Raw DB outcome -> the headline the dashboard shows for it (en.ts outcome*). */
@@ -223,6 +239,15 @@ export function sentimentTone(sentiment: string | null | undefined): SentimentTo
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/** The phone's 12/24-hour setting, read once: every clock time below uses it. */
+export const HOUR_CYCLE: 'h12' | 'h23' = deviceUses24HourClock() ? 'h23' : 'h12';
+
+/** A calendar day: '14 Oct 2026', day first with the month names dayLabel uses. Renewal dates use it on Settings and the paywall. */
+export function formatDay(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+}
+
 /**
  * One formatter per zone. Building an Intl.DateTimeFormat is the expensive part,
  * and a call list formats every row. An unknown IANA zone throws a RangeError
@@ -311,14 +336,14 @@ export function dayLabel(iso: string, timezone: string, now: Date = new Date()):
 
 const timeFormatters = new Map<string, Intl.DateTimeFormat>();
 
-/** A clock time in the owner's zone: '2:05 PM'. '' when unparseable. */
+/** A clock time in the owner's zone: '2:05 PM', or '14:05' on a 24-hour phone. '' when unparseable. */
 export function timeLabel(iso: string, timezone: string): string {
   const ms = Date.parse(iso);
   if (!Number.isFinite(ms)) return '';
   const key = timezone || '';
   let fmt = timeFormatters.get(key);
   if (!fmt) {
-    const opts: Intl.DateTimeFormatOptions = { hour: 'numeric', minute: '2-digit' };
+    const opts: Intl.DateTimeFormatOptions = { hour: 'numeric', minute: '2-digit', hourCycle: HOUR_CYCLE };
     try {
       fmt = new Intl.DateTimeFormat('en', timezone ? { ...opts, timeZone: timezone } : opts);
     } catch {
@@ -336,26 +361,13 @@ export function timeLabel(iso: string, timezone: string): string {
  * offset while the business - and the caller - still expect the original local
  * time. `timezone` comes from the same `ownerTimezone()` the dashboard uses; an
  * empty value falls back to the device zone.
+ *
+ * Day first like the rest of the app: 'Fri 30 Oct at 11:00', 'Today at 2:05 PM'.
+ * dayLabel and timeLabel already fall back to the device zone for an unknown zone.
  */
 export function formatWhen(iso: string, timezone: string): string {
-  const ms = Date.parse(iso);
-  if (!Number.isFinite(ms)) return '';
-  const opts: Intl.DateTimeFormatOptions = {
-    weekday: 'short',
-    day: 'numeric',
-    month: 'short',
-    hour: 'numeric',
-    minute: '2-digit',
-  };
-  if (timezone) opts.timeZone = timezone;
-  try {
-    return new Intl.DateTimeFormat('en', opts).format(new Date(ms));
-  } catch {
-    // An unknown IANA zone throws rather than falling back. Better to show the
-    // device's time than to blank the row.
-    delete opts.timeZone;
-    return new Intl.DateTimeFormat('en', opts).format(new Date(ms));
-  }
+  const day = dayLabel(iso, timezone);
+  return day ? `${day} at ${timeLabel(iso, timezone)}` : '';
 }
 
 export interface MinuteForecast {
@@ -427,4 +439,23 @@ export function forecastMinutes(
     exhaustedOnDay: dayHit <= daysInMonth ? dayHit : null,
     alreadyExceeded: used >= included,
   };
+}
+
+/**
+ * A typed note's title: its first line, cut at a word with "…" when it is
+ * longer than `max`. The same rule as the server's noteTitle
+ * (web lib/knowledge/sources.ts), so a guest's note keeps its title after it
+ * reaches the server.
+ */
+export function noteTitle(text: string, fallback: string, max = 50): string {
+  const firstLine = text.split('\n').map((l) => l.trim()).find(Boolean) ?? '';
+  if (!firstLine) return fallback;
+  if (firstLine.length <= max) return firstLine;
+  // The last space at or before max - 1 ends the longest run of whole words
+  // that still leaves room for the "…".
+  const space = firstLine.lastIndexOf(' ', max - 1);
+  // One long word (a URL) has no space worth cutting at, so it is cut by length.
+  const head = (space >= max / 2 ? firstLine.slice(0, space) : firstLine.slice(0, max - 1)).replace(/[\s,;:.-]+$/, '');
+  // A line of only dashes or dots (a pasted rule) leaves nothing to show.
+  return head ? `${head}…` : fallback;
 }

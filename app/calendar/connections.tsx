@@ -17,6 +17,7 @@ import {
   Notice,
   SkeletonCard,
   StaleNotice,
+  useLineLimit,
 } from '@/components/ui';
 import { colors, fonts, spacing, type } from '@/constants/theme';
 import { api } from '@/lib/api';
@@ -211,6 +212,7 @@ function ConnectedCard({
   /** Another connect is in flight. */
   locked: boolean;
 }) {
+  const oneLine = useLineLimit(1);
   const [busy, setBusy] = useState<'primary' | 'disconnect' | null>(null);
 
   async function makePrimary() {
@@ -262,11 +264,11 @@ function ConnectedCard({
             .filter(Boolean)
             .join(', ')}
         >
-          <Text style={styles.name} numberOfLines={1}>
+          <Text style={styles.name} numberOfLines={oneLine}>
             {row.name}
           </Text>
           {Boolean(row.account) && (
-            <Text style={styles.account} numberOfLines={1}>
+            <Text style={styles.account} numberOfLines={oneLine}>
               {row.account}
             </Text>
           )}
@@ -298,7 +300,7 @@ function ConnectedCard({
       )}
 
       <View style={styles.actions}>
-        {showPrimary && !row.isPrimary && (
+        {showPrimary && !row.isPrimary && !row.needsReconnect && (
           <Button
             label="Make primary"
             variant="secondary"

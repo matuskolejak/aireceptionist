@@ -1,6 +1,7 @@
 import * as Haptics from 'expo-haptics';
 import * as ExpoLinking from 'expo-linking';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { useFocusEffect, useNavigation, useRoute, useRouter } from 'expo-router';
+import { StackActions } from 'expo-router/react-navigation';
 import * as WebBrowser from 'expo-web-browser';
 import { useCallback, useEffect, useRef, useState, type Ref } from 'react';
 import {
@@ -9,6 +10,7 @@ import {
   Alert,
   AppState,
   BackHandler,
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -17,12 +19,14 @@ import {
   Text,
   TextInput,
   View,
+  type ScrollViewInstance,
+  type TextInputInstance,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Avatar } from '@/components/avatar';
 import { inputStyleLg, Sheet } from '@/components/form';
-import { Actions, Ask, CHAPTERS, FunnelHeader, Pill } from '@/components/funnel';
+import { Actions, Ask, CHAPTERS, FunnelHeader, Pill, StepScroll } from '@/components/funnel';
 import { Icon } from '@/components/Icon';
 import {
   CountryPicker,
@@ -48,15 +52,17 @@ import {
   Notice,
   pressed,
   StaleNotice,
+  useLargeText,
+  useLineLimit,
 } from '@/components/ui';
-import { colors, control, fonts, radius, spacing, type } from '@/constants/theme';
+import { colors, control, fonts, MAX_TITLE_SCALE, radius, spacing, type } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
 import { usePurchases } from '@/context/PurchaseContext';
 import { useSetupGate } from '@/context/SetupGate';
 import { useAiConsent } from '@/lib/ai-consent';
 import { api } from '@/lib/api';
 import { formatPhone } from '@/lib/format';
-import { dial } from '@/lib/links';
+import { dial, FORWARDING_GUIDE_URL, openInApp } from '@/lib/links';
 import type { DraftBasicsPartial } from '@/lib/onboarding-draft';
 import { voicePersonality, type Mood } from '@/lib/personality';
 import { STORE_NAME, type PlanKey } from '@/lib/purchases';
@@ -85,6 +91,8 @@ import { useQuery } from '@/lib/use-query';
  */
 export default function OnboardingScreen() {
   const router = useRouter();
+  const navigation = useNavigation();
+  const route = useRoute();
   const insets = useSafeAreaInsets();
   const { markSetupDone } = useSetupGate();
   const { session, email, signOut } = useAuth();
@@ -128,6 +136,22 @@ export default function OnboardingScreen() {
       router.replace('/(tabs)');
     }
   }, [data?.done, markSetupDone, router]);
+
+  // One funnel at a time. Expo Router 58 sends a screen that loses its guard
+  // here with a replace, and a replace always opens a NEW funnel - also over one
+  // already in the Stack (a link to a guarded screen, or a session that ends on
+  // the paywall opened from the funnel). This copy steps back to the first one,
+  // which keeps its place; a screen already opened above this one (sign-in)
+  // stays, because the pop counts from this route, not from the top.
+  useEffect(() => {
+    const state = navigation.getState();
+    if (!state) return;
+    const first = state.routes.findIndex((r) => r.name === 'onboarding');
+    const mine = state.routes.findIndex((r) => r.key === route.key);
+    if (first < mine) {
+      navigation.dispatch({ ...StackActions.pop(mine - first), target: state.key });
+    }
+  }, [navigation, route.key]);
 
   const advance = useCallback(
     async (next: number) => {
@@ -424,10 +448,29 @@ function KnowledgeStep({
   onBack: () => void;
   onDone: () => void;
 }) {
+  const oneLine = useLineLimit(1);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const notesRef = useRef<TextInput>(null);
+  const notesRef = useRef<TextInputInstance>(null);
+  const scroller = useRef<ScrollViewInstance>(null);
+  // Where the notes box starts in the scroll content, kept by its onLayout.
+  const notesY = useRef(0);
+  // With the keyboard up only a strip under the question card is left, so the
+  // box is moved to the top of it: the caret and the first lines stay in sight.
+  // Not a scroll to the end: the consent box and hints under the button would
+  // push the box back out of view.
+  const showNotes = useCallback(() => {
+    scroller.current?.scrollTo({ y: Math.max(0, notesY.current - spacing.sm), animated: true });
+  }, []);
+  // Focus lands before the keyboard has risen (a chip tap opens it), and the
+  // view above it only shrinks then, so scroll again once it is up.
+  useEffect(() => {
+    const sub = Keyboard.addListener('keyboardDidShow', () => {
+      if (notesRef.current?.isFocused()) showNotes();
+    });
+    return () => sub.remove();
+  }, [showNotes]);
   /**
    * Explicit permission before anything reaches the third-party AI (App Store
    * 5.1.2(i)): what is taught here is summarised by Gemini the moment it is
@@ -563,18 +606,20 @@ function KnowledgeStep({
 
   return (
     <View style={styles.step}>
-      <Ask
-        // It is literally reading while this runs, so it wears the reading face
-        // - the eyes stop wandering and the mouth narrows. That is the whole
-        // difference between a spinner and a character.
-        mood={busy ? 'studying' : moodOf(state, funnel)}
-        name={state.config.assistantName}
-        question="What should I know?"
-        sub="Your hours, your prices, where you are - whatever callers ask most."
-        nudge={nods}
-      />
-
-      <ScrollView
+      <StepScroll
+        ask={
+          <Ask
+            // It is literally reading while this runs, so it wears the reading face
+            // - the eyes stop wandering and the mouth narrows. That is the whole
+            // difference between a spinner and a character.
+            mood={busy ? 'studying' : moodOf(state, funnel)}
+            name={state.config.assistantName}
+            question="What should I know?"
+            sub="Your hours, your prices, where you are - whatever callers ask most."
+            nudge={nods}
+          />
+        }
+        scrollRef={scroller}
         style={styles.flex}
         contentContainerStyle={styles.stepContent}
         keyboardShouldPersistTaps="handled"
@@ -588,7 +633,7 @@ function KnowledgeStep({
               color={colors.textSecondary}
             />
             <View style={styles.flex}>
-              <Text style={styles.sourceTitle} numberOfLines={1}>
+              <Text style={styles.sourceTitle} numberOfLines={oneLine}>
                 {src.title}
               </Text>
               {Boolean(src.summary) && (
@@ -612,7 +657,7 @@ function KnowledgeStep({
           <View key={`pending-${i}`} style={styles.sourceRow}>
             <Icon name="time-outline" size={ICON.row} color={colors.textSecondary} />
             <View style={styles.flex}>
-              <Text style={styles.sourceTitle} numberOfLines={1}>
+              <Text style={styles.sourceTitle} numberOfLines={oneLine}>
                 {note.split('\n').find((l) => l.trim()) ?? note}
               </Text>
               <Text style={styles.sourceSummary}>
@@ -633,6 +678,8 @@ function KnowledgeStep({
                 // replacing the last. The caret is left at the end either way.
                 setText((cur) => (cur.trim() ? `${cur.replace(/\s+$/, '')}\n${s.seed}` : s.seed));
                 notesRef.current?.focus();
+                // Already focused, focus() fires no onFocus, so bring the box up here.
+                showNotes();
               }}
             />
           ))}
@@ -648,6 +695,19 @@ function KnowledgeStep({
           accessibilityLabel="What your receptionist should know"
           multiline
           textAlignVertical="top"
+          // A direct child of the scroll content, so y is its offset in it.
+          // When it moves while it is being typed in, scroll again: a taught
+          // note adds a row above it, and on Android the keyboard event that
+          // scrolls here also shrinks the question above it at the large text
+          // sizes. Not with the keyboard down: on Android the Back key hides it
+          // but keeps focus, and the question grows back then.
+          onLayout={(e) => {
+            const y = e.nativeEvent.layout.y;
+            if (y === notesY.current) return;
+            notesY.current = y;
+            if (Keyboard.isVisible() && notesRef.current?.isFocused()) showNotes();
+          }}
+          onFocus={showNotes}
         />
         <Pressable
           onPress={() => void add()}
@@ -692,7 +752,7 @@ function KnowledgeStep({
           </Text>
         )}
         {err ? <Text style={styles.error}>{err}</Text> : null}
-      </ScrollView>
+      </StepScroll>
 
       <Actions
         primary={{
@@ -725,6 +785,7 @@ function CalendarStep({
   onBack: () => void;
   onDone: () => void;
 }) {
+  const oneLine = useLineLimit(1);
   const [busy, setBusy] = useState(false);
   const [connecting, setConnecting] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -786,14 +847,18 @@ function CalendarStep({
 
   return (
     <View style={styles.step}>
-      <Ask
-        mood={moodOf(state, funnel)}
-        name={state.config.assistantName}
-        question="Should I book appointments?"
-        sub="Give me a calendar and I check when you are free, then book the caller straight in."
-      />
-
-      <ScrollView style={styles.flex} contentContainerStyle={styles.stepContent}>
+      <StepScroll
+        ask={
+          <Ask
+            mood={moodOf(state, funnel)}
+            name={state.config.assistantName}
+            question="Should I book appointments?"
+            sub="Give me a calendar and I check when you are free, then book the caller straight in."
+          />
+        }
+        style={styles.flex}
+        contentContainerStyle={styles.stepContent}
+      >
         {connected ? (
           <View style={styles.doneCard}>
             <Icon name="checkmark-circle" size={22} color={colors.successText} />
@@ -811,17 +876,17 @@ function CalendarStep({
             <View
               style={styles.preview}
               accessible
-              accessibilityLabel={`Example booking: Tuesday 10:30, Checkup - Sarah Doyle, booked by ${state.config.assistantName || 'me'} on a call`}
+              accessibilityLabel={`Example booking: Tuesday 10:30, New client visit - Sarah Doyle, booked by ${state.config.assistantName || 'me'} on a call`}
             >
               <View style={styles.previewStripe} />
               <View style={styles.flex}>
                 <Text style={styles.previewWhen}>Tuesday 10:30</Text>
-                <Text style={styles.previewWhat} numberOfLines={1}>
-                  Checkup - Sarah Doyle
+                <Text style={styles.previewWhat} numberOfLines={oneLine}>
+                  New client visit - Sarah Doyle
                 </Text>
                 <View style={styles.previewByRow}>
                   <Icon name="call-outline" size={13} color={colors.textSecondary} />
-                  <Text style={styles.previewBy} numberOfLines={1}>
+                  <Text style={styles.previewBy} numberOfLines={oneLine}>
                     Booked by {state.config.assistantName || 'me'} on a call
                   </Text>
                 </View>
@@ -871,7 +936,7 @@ function CalendarStep({
         )}
 
         {err ? <Text style={styles.error}>{err}</Text> : null}
-      </ScrollView>
+      </StepScroll>
 
       <Actions
         primary={{
@@ -904,6 +969,11 @@ function PlanStep({
   onRefresh: () => Promise<void>;
   onBack: () => void;
 }) {
+  const oneLine = useLineLimit(1);
+  // Side by side, the label keeps its width and leaves the value a sliver at
+  // the accessibility sizes ("Brigh / t / Dent / al"), so there the value goes
+  // under the label, as the ui Row does.
+  const large = useLargeText();
   const router = useRouter();
   const purchases = usePurchases();
   const guest = funnel.guest;
@@ -1051,25 +1121,29 @@ function PlanStep({
 
   return (
     <View style={styles.step}>
-      <Ask
-        mood="celebrate"
-        name={state.config.assistantName}
-        question={guest ? 'Ready when you are.' : 'Pick a plan and I go live.'}
-        sub={
-          guest
-            ? 'Create your account to put me on a real number. Everything you set up is saved.'
-            : 'Your number is bought the moment this goes through.'
+      <StepScroll
+        ask={
+          <Ask
+            mood="celebrate"
+            name={state.config.assistantName}
+            question={guest ? 'Ready when you are.' : 'Pick a plan and I go live.'}
+            sub={
+              guest
+                ? 'Create your account to put me on a real number. Everything you set up is saved.'
+                : 'Your number is bought the moment this goes through.'
+            }
+          />
         }
-      />
-
-      <ScrollView style={styles.flex} contentContainerStyle={styles.stepContent}>
+        style={styles.flex}
+        contentContainerStyle={styles.stepContent}
+      >
         {/* What they configured, so the commitment is made against something
             concrete rather than from memory. The web shows the same review. */}
         <View style={styles.summary}>
           {facts.map((row) => (
-            <View key={row.label} style={styles.summaryRow}>
+            <View key={row.label} style={[styles.summaryRow, large && styles.summaryStacked]}>
               <Text style={styles.summaryLabel}>{row.label}</Text>
-              <Text style={styles.summaryValue} numberOfLines={1}>
+              <Text style={[styles.summaryValue, large && styles.summaryValueStacked]} numberOfLines={oneLine}>
                 {row.value}
               </Text>
             </View>
@@ -1083,10 +1157,12 @@ function PlanStep({
             accessibilityState={{ busy: countryBusy }}
             style={({ pressed: down }) => [styles.summaryRow, styles.countryRow, down && pressed]}
           >
-            <Text style={styles.summaryLabel}>Number in</Text>
-            <Text style={styles.summaryValue} numberOfLines={1}>
-              {country ? `${country.flag} ${country.name}` : 'Choose a country'}
-            </Text>
+            <View style={[styles.summaryPair, large && styles.summaryStacked]}>
+              <Text style={styles.summaryLabel}>Number in</Text>
+              <Text style={[styles.summaryValue, large && styles.summaryValueStacked]} numberOfLines={oneLine}>
+                {country ? `${country.flag} ${country.name}` : 'Choose a country'}
+              </Text>
+            </View>
             {countryBusy ? (
               <ActivityIndicator size="small" color={colors.textSecondary} />
             ) : (
@@ -1153,7 +1229,7 @@ function PlanStep({
         {!guest ? (
           <PaywallLegalLinks onRestore={() => void restore()} restoreBusy={paywall.busy === 'restore'} />
         ) : null}
-      </ScrollView>
+      </StepScroll>
 
       <Actions
         primary={primary}
@@ -1314,7 +1390,7 @@ function Provisioning({ assistantName }: { assistantName: string }) {
         <Avatar mood="celebrate" celebrate size={120} label={name} />
         {poll.sandbox ? (
           <>
-            <Text style={styles.stepTitle} accessibilityRole="header">
+            <Text style={styles.stepTitle} accessibilityRole="header" maxFontSizeMultiplier={MAX_TITLE_SCALE}>
               {name} is set up
             </Text>
             <Text style={styles.stepBody}>
@@ -1325,7 +1401,7 @@ function Provisioning({ assistantName }: { assistantName: string }) {
           </>
         ) : (
           <>
-            <Text style={styles.stepTitle} accessibilityRole="header">
+            <Text style={styles.stepTitle} accessibilityRole="header" maxFontSizeMultiplier={MAX_TITLE_SCALE}>
               {name} is answering
             </Text>
             {poll.e164 ? (
@@ -1341,9 +1417,36 @@ function Provisioning({ assistantName }: { assistantName: string }) {
             ) : null}
             <Text style={styles.stepBody}>
               {poll.e164
-                ? 'Ring that number and hear it for yourself. Forward your business line to it when you are happy.'
+                ? 'Ring that number and hear it for yourself.'
                 : 'Everything is ready. Your number and settings are in the app.'}
             </Text>
+            {poll.e164 ? (
+              <>
+                {/* The number only gets calls once the business line forwards
+                    to it. Carrier codes differ by carrier, so the steps live in
+                    the guide, not here. */}
+                <Notice
+                  title={`Send your calls to ${name}`}
+                  icon="call-outline"
+                  style={styles.forwardNotice}
+                  action={
+                    <Button
+                      label="How to forward calls"
+                      variant="secondary"
+                      size="pill"
+                      onPress={() => void openInApp(FORWARDING_GUIDE_URL)}
+                      style={styles.forwardLink}
+                    />
+                  }
+                >
+                  Turn on call forwarding on your business line to the number above. Your phone
+                  carrier can do it, or use the steps in our guide.
+                </Notice>
+                <Text style={styles.stepBody}>
+                  Then call your business number from another phone to check that {name} answers.
+                </Text>
+              </>
+            ) : null}
           </>
         )}
 
@@ -1360,7 +1463,7 @@ function Provisioning({ assistantName }: { assistantName: string }) {
         <View style={styles.errorIcon}>
           <Icon name="alert-circle-outline" size={26} color={colors.errorText} />
         </View>
-        <Text style={styles.stepTitle} accessibilityRole="header">
+        <Text style={styles.stepTitle} accessibilityRole="header" maxFontSizeMultiplier={MAX_TITLE_SCALE}>
           Setup didn&apos;t finish
         </Text>
         {poll.error ? (
@@ -1392,7 +1495,7 @@ function Provisioning({ assistantName }: { assistantName: string }) {
           the thing you are waiting for is visibly doing it. */}
       <Avatar mood="studying" size={104} label={name} />
       <ActivityIndicator color={colors.ink} style={styles.spinner} />
-      <Text style={styles.stepTitle} accessibilityRole="header">
+      <Text style={styles.stepTitle} accessibilityRole="header" maxFontSizeMultiplier={MAX_TITLE_SCALE}>
         {waitingForStore
           ? `Confirming your purchase with ${STORE_NAME === 'App Store' ? 'the App Store' : 'Google Play'}`
           : `Setting up ${assistantName.trim() || 'your receptionist'}`}
@@ -1415,6 +1518,7 @@ function Provisioning({ assistantName }: { assistantName: string }) {
  * follows a tap on "Turn on alerts".
  */
 function PushPrimer() {
+  const largeText = useLargeText();
   const [show, setShow] = useState(false);
   const [asking, setAsking] = useState(false);
   const [note, setNote] = useState<string | null>(null);
@@ -1459,13 +1563,13 @@ function PushPrimer() {
         Get an alert with who called and what your receptionist did: bookings, messages, and
         anything that needs you.
       </Text>
-      <View style={styles.primerActions}>
+      <View style={[styles.primerActions, largeText && styles.primerActionsStacked]}>
         <Button
           label="Turn on alerts"
           size="pill"
           onPress={() => void turnOn()}
           busy={asking}
-          style={styles.flex}
+          style={largeText ? undefined : styles.flex}
         />
         <Button
           label="Not now"
@@ -1473,7 +1577,7 @@ function PushPrimer() {
           variant="secondary"
           onPress={() => void notNow()}
           disabled={asking}
-          style={styles.flex}
+          style={largeText ? undefined : styles.flex}
         />
       </View>
     </View>
@@ -1486,8 +1590,9 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   spinner: { marginTop: spacing.lg },
   // The step owns the space under the header and splits it itself: question
-  // pinned, answer scrolling, actions docked. Nothing here reflows when the
-  // answer grows.
+  // pinned (at the accessibility sizes it scrolls with the answer, see
+  // StepScroll), answer scrolling, actions docked. Nothing here reflows when
+  // the answer grows.
   body: { flex: 1 },
   step: { flex: 1 },
   stepContent: { padding: spacing.lg, gap: spacing.sm, paddingBottom: spacing.xl },
@@ -1508,11 +1613,12 @@ const styles = StyleSheet.create({
   sourceTitle: { ...type.body, fontFamily: fonts.semibold },
   sourceSummary: { ...type.footnote, marginTop: 2 },
   starters: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm, marginVertical: spacing.xs },
+  // No lineHeight: it leaks into later single-line placeholders (see
+  // inputMultiline in components/form.tsx).
   notes: {
     ...inputStyleLg,
     minHeight: 132,
     padding: spacing.lg,
-    lineHeight: 24,
   },
   addRow: {
     flexDirection: 'row',
@@ -1582,6 +1688,24 @@ const styles = StyleSheet.create({
   countryRow: { minHeight: control.md },
   summaryLabel: { ...type.footnote },
   summaryValue: { ...type.labelLg, flex: 1, fontFamily: fonts.semibold, textAlign: 'right' },
+  // The country row's label and value: laid out like a summaryRow, beside the chevron.
+  summaryPair: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.md,
+  },
+  // The accessibility sizes: the value under the label, like the ui Row.
+  summaryStacked: {
+    flexDirection: 'column',
+    alignItems: 'flex-start',
+    justifyContent: 'flex-start',
+    gap: 2,
+    paddingVertical: spacing.xs,
+  },
+  // flex 0: a flex-1 child of an auto-height column can collapse to no height.
+  summaryValueStacked: { flex: 0, textAlign: 'left' },
   toggle: { marginTop: spacing.md },
   plans: { marginTop: spacing.sm },
   sheetHint: { ...type.bodySm, color: colors.textSecondary, marginBottom: spacing.md },
@@ -1606,6 +1730,8 @@ const styles = StyleSheet.create({
     backgroundColor: colors.errorSoft,
   },
   errorNotice: { alignSelf: 'stretch', marginTop: spacing.md },
+  forwardNotice: { alignSelf: 'stretch', marginTop: spacing.lg },
+  forwardLink: { alignSelf: 'flex-start' },
   cta: { marginTop: spacing.xl, alignSelf: 'stretch' },
   ctaSecond: { marginTop: spacing.sm, alignSelf: 'stretch' },
   doneWrap: {
@@ -1640,5 +1766,7 @@ const styles = StyleSheet.create({
   primerTitle: { ...type.title, flex: 1 },
   primerBody: { ...type.bodySm, color: colors.textSecondary },
   primerActions: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.xs },
+  /** At the accessibility text sizes two pills side by side get too narrow for their labels. */
+  primerActionsStacked: { flexDirection: 'column' },
   primerNote: { ...type.caption, marginTop: spacing.lg, textAlign: 'center' },
 });

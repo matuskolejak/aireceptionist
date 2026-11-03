@@ -11,7 +11,6 @@
     "scheme": "aireceptionistnow",
     "userInterfaceStyle": "light",
     "backgroundColor": "#F8F9FB",
-    "newArchEnabled": true,
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.aireceptionistnow.app",
@@ -27,7 +26,6 @@
         "backgroundColor": "#1D1D1D",
         "monochromeImage": "./assets/images/adaptive-icon.png"
       },
-      "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "blockedPermissions": [
         "android.permission.READ_EXTERNAL_STORAGE",
@@ -83,7 +81,7 @@
         "expo-build-properties",
         {
           "ios": {
-            "deploymentTarget": "15.1"
+            "deploymentTarget": "16.4"
           },
           "android": {
             "minSdkVersion": 24

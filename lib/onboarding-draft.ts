@@ -2,6 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { aiConsentGiven } from './ai-consent';
 import { api } from './api';
+import { isValidPhone } from './phone';
 import type { BillingCycle, OnboardingState } from './types';
 
 /**
@@ -73,12 +74,9 @@ export const EMPTY_DRAFT: OnboardingDraft = {
   calendarPassed: false,
 };
 
-/** The transfer number's shape, exactly as the server checks it. */
-const ALERT_PHONE = /^\+[1-9]\d{6,15}$/;
-
 /** Whether a joined transfer number (dial code included) would pass the server's check. */
 export function isValidAlertPhone(phone: string): boolean {
-  return ALERT_PHONE.test(phone.replace(/[\s().-]/g, ''));
+  return isValidPhone(phone);
 }
 
 const STRING_KEYS = [

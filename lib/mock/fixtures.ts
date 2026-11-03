@@ -153,6 +153,8 @@ export interface MockCall {
   actions: CallActionItem[];
   /** The live call only: everything it will say. `turns` is the part said so far. */
   script?: MockTurn[];
+  /** Set by a report, like a `call_reports` row on the server. */
+  reported?: boolean;
 }
 
 /** Ids with a hand-written detail. `gone` is not a call at all: it answers 404. */
@@ -836,7 +838,7 @@ export function buildAssistant(now: number, name = MOCK_ASSISTANT, business = MO
     // account's connections at request time. 'read' is what legacy 'busy'
     // arrives as.
     calendars: [
-      { id: 'int-google', provider: 'google', name: 'Google Calendar', level: 'book' },
+      { id: 'int-google', provider: 'google', name: 'Google Calendar', level: 'write' },
       { id: 'int-outlook', provider: 'outlook', name: 'Microsoft Calendar', level: 'read' },
     ],
     setup: {
@@ -1102,9 +1104,9 @@ export function buildKnowledge(now: number): MockKnowledge {
       'Pearse Street; Pearse DART station is two minutes away.',
     notes: 'Dr. Byrne is off every second Friday. Never quote treatment prices over the phone.',
     verified:
-      'Do you take new patients? | Yes, we are taking new patients.\n' +
-      'Are you open on Saturdays? | No, we are open Monday to Friday only.\n' +
-      'Is there parking? | Pay and display on Pearse Street.',
+      'Q: Do you take new patients?\nA: Yes, we are taking new patients.\n\n' +
+      'Q: Are you open on Saturdays?\nA: No, we are open Monday to Friday only.\n\n' +
+      'Q: Is there parking?\nA: Pay and display on Pearse Street.',
     sources: [
       {
         id: 'src-web',

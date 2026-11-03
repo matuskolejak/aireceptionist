@@ -25,6 +25,7 @@ import type {
   SettingsState,
   VoiceCatalog,
 } from './types';
+import { countsAsWrite, noteWrite } from './write-clock';
 
 const BASE = (process.env.EXPO_PUBLIC_API_URL ?? '').replace(/\/+$/, '');
 
@@ -75,7 +76,7 @@ const TIMEOUT_MS = 20_000;
 // retries an operation that was actually still running.
 const SLOW_TIMEOUT_MS = 60_000;
 
-export type RequestOptions = RequestInit & { slow?: boolean; anon?: boolean };
+export type RequestOptions = RequestInit & { slow?: boolean; anon?: boolean; write?: boolean };
 
 /**
  * `anon: true` skips the bearer check for the routes that have none
@@ -83,6 +84,10 @@ export type RequestOptions = RequestInit & { slow?: boolean; anon?: boolean };
  * funnel and sign-in run before there is a session - see app/onboarding.tsx.
  * Never set it on a route that reads user data: the token would simply be
  * omitted and the request would 401 at best, or read nothing at worst.
+ *
+ * `write: false` marks a POST that changes nothing a screen shows (see
+ * countsAsWrite in lib/write-clock.ts). Any other successful non-GET makes
+ * every screen refetch when it next comes forward.
  */
 async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   // Dev-only mock backend (EXPO_PUBLIC_MOCK=1, see lib/mock/server.ts). Written
@@ -90,7 +95,11 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   // `__DEV__` to false and drops both the branch and the whole lib/mock tree.
   if (__DEV__ && process.env.EXPO_PUBLIC_MOCK === '1') {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    return (require('./mock/server') as typeof import('./mock/server')).mockRequest<T>(path, init);
+    const mock = require('./mock/server') as typeof import('./mock/server');
+    const result = await mock.mockRequest<T>(path, init);
+    // As after a real request below, so mock mode lifts the guard too.
+    if (countsAsWrite(init)) noteWrite();
+    return result;
   }
 
   if (!apiConfigured) {
@@ -156,6 +165,10 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
     );
   }
 
+  // The server took the write. Screens that hold an older copy refetch when
+  // they come forward, instead of waiting out STALE_MS (lib/write-clock.ts).
+  if (countsAsWrite(init)) noteWrite();
+
   // 204 and an empty body both parse as a failure, and several writes return
   // nothing worth reading.
   const text = await res.text();
@@ -184,8 +197,8 @@ function query(params: Record<string, string | undefined>): string {
   return `?${entries.map(([k, v]) => `${k}=${encodeURIComponent(v as string)}`).join('&')}`;
 }
 
-const post = <T>(path: string, body?: unknown, slow?: boolean) =>
-  request<T>(path, { method: 'POST', body: JSON.stringify(body ?? {}), slow });
+const post = <T>(path: string, body?: unknown, opts?: Pick<RequestOptions, 'slow' | 'write'>) =>
+  request<T>(path, { method: 'POST', body: JSON.stringify(body ?? {}), ...opts });
 
 /** Every write that can partly succeed answers in this shape. */
 export interface WriteResult {
@@ -233,7 +246,7 @@ export interface WebLinkResult {
  * review rejects.
  */
 function webLink(req: { target: 'calendar'; provider: string; returnUrl: string }): Promise<WebLinkResult> {
-  return post<WebLinkResult>('/api/mobile/web-link', req);
+  return post<WebLinkResult>('/api/mobile/web-link', req, { write: false });
 }
 
 export const api = {
@@ -316,6 +329,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ texts, locale }),
       slow: true,
+      write: false,
     }),
 
   /**
@@ -380,7 +394,7 @@ export const api = {
    * 'unverified' (the plan check itself failed - retry).
    */
   getAssistantNumber: (id: string, country: string) =>
-    post<{ e164: string; id: string }>(`/api/mobile/assistants/${id}/number`, { country }, true),
+    post<{ e164: string; id: string }>(`/api/mobile/assistants/${id}/number`, { country }, { slow: true }),
 
   unlinkAssistantNumber: (id: string) =>
     request<WriteResult>(`/api/mobile/assistants/${id}/number`, {
@@ -389,7 +403,7 @@ export const api = {
     }),
 
   testCall: (id: string, to: string) =>
-    post<WriteResult>(`/api/mobile/assistants/${id}/test-call`, { to }, true),
+    post<WriteResult>(`/api/mobile/assistants/${id}/test-call`, { to }, { slow: true }),
 
   voices: () => request<VoiceCatalog>('/api/mobile/voices'),
 
@@ -400,10 +414,10 @@ export const api = {
     post<WriteResult>('/api/mobile/knowledge', { business, action: 'notes', notes, verified }),
 
   addKnowledgeWebsite: (business: string, url: string) =>
-    post<WriteResult>('/api/mobile/knowledge', { business, action: 'website', url }, true),
+    post<WriteResult>('/api/mobile/knowledge', { business, action: 'website', url }, { slow: true }),
 
   addKnowledgeText: (business: string, text: string) =>
-    post<WriteResult>('/api/mobile/knowledge', { business, action: 'text', text }, true),
+    post<WriteResult>('/api/mobile/knowledge', { business, action: 'text', text }, { slow: true }),
 
   /**
    * Answer one "question it could not answer": the pair joins the verified
@@ -453,11 +467,11 @@ export const api = {
    * refunded; 5xx and 0 are transient - leave the transaction unfinished.
    */
   verifyApplePurchase: (body: AppleVerifyBody) =>
-    post<BillingSnapshot>('/api/mobile/billing/apple/verify', body, true),
+    post<BillingSnapshot>('/api/mobile/billing/apple/verify', body, { slow: true }),
 
   /** Sync Google Play via RevenueCat. 402 when RevenueCat has no active subscription; 409 as for Apple. */
   syncGooglePurchase: (body: GoogleSyncBody) =>
-    post<BillingSnapshot>('/api/mobile/billing/google/sync', body, true),
+    post<BillingSnapshot>('/api/mobile/billing/google/sync', body, { slow: true }),
 
   /**
    * The App Review sign-in: a fixed review email and code the server checks.
@@ -477,7 +491,7 @@ export const api = {
    * user can act on.
    */
   registerAppleToken: (authorizationCode: string) =>
-    post<{ ok: boolean }>('/api/mobile/auth/apple-token', { authorizationCode }),
+    post<{ ok: boolean }>('/api/mobile/auth/apple-token', { authorizationCode }, { write: false }),
 
   notifications: () =>
     request<{ items: NotificationItem[]; activeCall: boolean; activeCallId: string | null }>(
@@ -493,11 +507,11 @@ export const api = {
 
   /** Register this install for push. Idempotent - safe on every cold start. */
   registerPush: (token: string, platform: string) =>
-    post<WriteResult>('/api/mobile/push', { token, platform }),
+    post<WriteResult>('/api/mobile/push', { token, platform }, { write: false }),
 
   /** Mute or unmute delivery server-side, keeping the row. */
   setPushEnabled: (token: string, enabled: boolean) =>
-    post<WriteResult>('/api/mobile/push', { token, enabled }),
+    post<WriteResult>('/api/mobile/push', { token, enabled }, { write: false }),
 
   unregisterPush: (token: string) =>
     request<WriteResult>('/api/mobile/push', {
@@ -508,9 +522,10 @@ export const api = {
   onboarding: () => request<OnboardingState>('/api/mobile/onboarding'),
 
   onboardingAction: (body: Record<string, unknown>) =>
-    post<{ ok?: boolean; step?: number }>('/api/mobile/onboarding', body, true),
+    post<{ ok?: boolean; step?: number }>('/api/mobile/onboarding', body, { slow: true }),
 
-  provision: () => post<ProvisionPoll>('/api/mobile/onboarding', { action: 'provision' }, true),
+  provision: () =>
+    post<ProvisionPoll>('/api/mobile/onboarding', { action: 'provision' }, { slow: true, write: false }),
 
   webLink,
 
@@ -536,7 +551,7 @@ export const api = {
     model: string;
     osVersion: string;
     appVersion: string;
-  }) => post<WriteResult>('/api/mobile/devices', info),
+  }) => post<WriteResult>('/api/mobile/devices', info, { write: false }),
 
   /** Every install signed into this account, most recently used first. */
   devices: () => request<{ devices: AccountDevice[] }>('/api/mobile/devices'),

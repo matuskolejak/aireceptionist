@@ -1,7 +1,7 @@
 import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, RefreshControl, SectionList, StyleSheet, Text, View } from 'react-native';
+import { AccessibilityInfo, Pressable, RefreshControl, SectionList, StyleSheet, Text, View } from 'react-native';
 
 import { SaveBar, Sheet, SwitchRow, TextField } from '@/components/form';
 import { Icon } from '@/components/Icon';
@@ -18,6 +18,7 @@ import {
   SkeletonCard,
   StaleNotice,
   TextLink,
+  useLineLimit,
   type BadgeTone,
 } from '@/components/ui';
 import { colors, fonts, spacing, type } from '@/constants/theme';
@@ -198,7 +199,7 @@ export default function AppointmentsScreen() {
           stickySectionHeadersEnabled={false}
           onScrollToIndexFailed={onScrollToIndexFailed}
           contentContainerStyle={sections.length === 0 ? styles.emptyWrap : styles.list}
-          ListHeaderComponent={error ? <StaleNotice message={error} onRetry={refresh} /> : null}
+          ListHeaderComponent={error ? <StaleNotice message={error} onRetry={refresh} /> : undefined}
           refreshControl={
             <RefreshControl
               refreshing={refreshing}
@@ -276,7 +277,8 @@ function dayTitle(key: string, today: string): string {
   if (key === nextDayKey(today)) return 'Tomorrow';
   const [y, m, d] = key.split('-').map(Number);
   if (!y || !m || !d) return key;
-  return new Intl.DateTimeFormat('en', {
+  // en-GB: day first ('Friday 30 October'), like dayLabel in the rest of the app.
+  return new Intl.DateTimeFormat('en-GB', {
     weekday: 'long',
     day: 'numeric',
     month: 'long',
@@ -441,7 +443,7 @@ function formatAllDay(iso: string, withDate: boolean): string {
   if (!withDate) return 'All day';
   const [y, m, d] = iso.slice(0, 10).split('-').map(Number);
   if (!y || !m || !d) return 'All day';
-  const when = new Intl.DateTimeFormat('en', {
+  const when = new Intl.DateTimeFormat('en-GB', {
     weekday: 'short',
     day: 'numeric',
     month: 'short',
@@ -452,11 +454,13 @@ function formatAllDay(iso: string, withDate: boolean): string {
 
 /** A caller who asked for an appointment without a usable time. */
 function RequestCard({ booking }: { booking: Booking }) {
+  const threeLines = useLineLimit(3);
   const router = useRouter();
   const phone = booking.attendeePhone || booking.callerNumber;
   const name = booking.attendeeName || callerLabel(phone);
-  const booked = relTimeOf(booking.bookedAt);
-  const meta = [booking.attendeeName && phone ? formatPhone(phone) : null, booked ? `Booked ${booked}` : null]
+  // Nothing is booked yet: say when the caller asked (the web's "Added").
+  const asked = relTimeOf(booking.bookedAt);
+  const meta = [booking.attendeeName && phone ? formatPhone(phone) : null, asked ? `Asked ${asked}` : null]
     .filter(Boolean)
     .join(' · ');
 
@@ -465,7 +469,7 @@ function RequestCard({ booking }: { booking: Booking }) {
       <Text style={styles.cardTitle}>{name}</Text>
       {meta ? <Text style={styles.meta}>{meta}</Text> : null}
       {Boolean(booking.notes) && (
-        <Text style={styles.notes} numberOfLines={3}>
+        <Text style={styles.notes} numberOfLines={threeLines}>
           {booking.notes}
         </Text>
       )}
@@ -512,6 +516,7 @@ function EventCard({
   showDate: boolean;
   past: boolean;
 }) {
+  const oneLine = useLineLimit(1);
   const title = event.title || 'Busy';
   const when = event.allDay
     ? formatAllDay(event.start, showDate)
@@ -522,7 +527,7 @@ function EventCard({
   const body = (
     <Card style={styles.card}>
       <View style={styles.cardHead}>
-        <Text style={styles.cardTitle} numberOfLines={1}>
+        <Text style={styles.cardTitle} numberOfLines={oneLine}>
           {title}
         </Text>
         <Badge label={event.providerLabel} tone="neutral" />
@@ -532,7 +537,7 @@ function EventCard({
         {event.url ? <Icon name="open-outline" size={ICON.chevron} color={colors.textSecondary} /> : null}
       </View>
       {Boolean(event.location) && (
-        <Text style={styles.meta} numberOfLines={1}>
+        <Text style={styles.meta} numberOfLines={oneLine}>
           {event.location}
         </Text>
       )}
@@ -580,6 +585,9 @@ function BookingCard({
   onRefresh: () => Promise<void>;
   onCancel: () => void;
 }) {
+  const oneLine = useLineLimit(1);
+  const twoLines = useLineLimit(2);
+  const threeLines = useLineLimit(3);
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
@@ -613,6 +621,8 @@ function BookingCard({
       await api.retryBooking(booking.id);
       await onRefresh();
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      // The card leaves Needs attention, so a screen reader user would hear nothing.
+      AccessibilityInfo.announceForAccessibility('Synced to your calendar.');
     } catch (err) {
       setRetryError((err as Error).message || "Still couldn't reach your calendar. Try again in a moment.");
     } finally {
@@ -623,19 +633,19 @@ function BookingCard({
   return (
     <Card style={styles.card}>
       <View style={styles.cardHead}>
-        <Text style={[styles.cardTitle, cancelled && styles.struck]} numberOfLines={2}>
+        <Text style={[styles.cardTitle, cancelled && styles.struck]} numberOfLines={twoLines}>
           {title}
         </Text>
         {badge ? <Badge label={badge.label} tone={badge.tone} /> : null}
       </View>
       <Text style={[styles.when, past && styles.whenPast]}>{when}</Text>
       {detail ? (
-        <Text style={styles.meta} numberOfLines={1}>
+        <Text style={styles.meta} numberOfLines={oneLine}>
           {detail}
         </Text>
       ) : null}
       {Boolean(booking.notes) && (
-        <Text style={styles.notes} numberOfLines={3}>
+        <Text style={styles.notes} numberOfLines={threeLines}>
           {booking.notes}
         </Text>
       )}
@@ -779,6 +789,7 @@ function CancelSheet({
           dirty={!done}
           state={state}
           label="Cancel appointment"
+          variant="danger"
           secondary={done ? undefined : { label: 'Keep it', onPress: onClose }}
         />
       }

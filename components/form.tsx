@@ -21,7 +21,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Icon, type IconName } from '@/components/Icon';
-import { Button, Chip, ICON, IconButton, pressed, ripple } from '@/components/ui';
+import { Button, Chip, ICON, IconButton, pressed, ripple, useLineLimit, type ButtonVariant } from '@/components/ui';
 import { colors, control, MAX_FONT_SCALE, radius, spacing, type } from '@/constants/theme';
 
 /**
@@ -281,6 +281,7 @@ export function SelectRow({
   searchable?: boolean;
   disabled?: boolean;
 }) {
+  const oneLine = useLineLimit(1);
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
   const insets = useSafeAreaInsets();
@@ -317,7 +318,7 @@ export function SelectRow({
       >
         <Text
           style={[styles.selectValue, !selected && { color: colors.textMuted }]}
-          numberOfLines={1}
+          numberOfLines={oneLine}
           maxFontSizeMultiplier={MAX_FONT_SCALE}
         >
           {selected?.label ?? placeholder}
@@ -506,6 +507,7 @@ export function SaveBar({
   dirty,
   state,
   label = 'Save',
+  variant = 'primary',
   secondary,
 }: {
   onSave: () => void;
@@ -513,6 +515,8 @@ export function SaveBar({
   dirty: boolean;
   state: { ok: boolean; message: string } | null;
   label?: string;
+  /** 'danger' for a destructive confirm, like the web's red "Cancel appointment". */
+  variant?: ButtonVariant;
   /** A quiet way out beside the primary: "Keep it" next to "Cancel appointment". */
   secondary?: { label: string; onPress: () => void };
 }) {
@@ -548,6 +552,7 @@ export function SaveBar({
       <Button
         label={label}
         onPress={onSave}
+        variant={variant}
         busy={busy}
         disabled={!dirty}
         style={styles.saveButton}
@@ -570,6 +575,7 @@ export function Sheet({
   children: ReactNode;
   footer?: ReactNode;
 }) {
+  const oneLine = useLineLimit(1);
   const insets = useSafeAreaInsets();
   return (
     <Modal
@@ -597,7 +603,7 @@ export function Sheet({
           {/* The status-bar inset is padded INSIDE the white head, so the band
               above the title is surface rather than a strip of page grey. */}
           <View style={[styles.sheetHead, { paddingTop: insets.top + spacing.sm }]}>
-            <Text style={styles.sheetTitle} numberOfLines={1} accessibilityRole="header">
+            <Text style={styles.sheetTitle} numberOfLines={oneLine} accessibilityRole="header">
               {title}
             </Text>
             <IconButton icon="close" label="Close" tone="plain" onPress={onClose} style={styles.sheetClose} />
@@ -632,6 +638,7 @@ export function TopicRow({
   onPress: () => void;
   style?: StyleProp<ViewStyle>;
 }) {
+  const oneLine = useLineLimit(1);
   return (
     <Pressable
       onPress={onPress}
@@ -646,7 +653,7 @@ export function TopicRow({
       </View>
       <View style={styles.flex}>
         <Text style={styles.topicTitle}>{title}</Text>
-        <Text style={styles.topicValue} numberOfLines={1}>
+        <Text style={styles.topicValue} numberOfLines={oneLine}>
           {value}
         </Text>
       </View>
@@ -667,7 +674,10 @@ const styles = StyleSheet.create({
   error: { ...type.caption, marginTop: 6, color: colors.errorText },
   input: inputStyle,
   inputLg: inputStyleLg,
-  inputMultiline: { minHeight: 110, lineHeight: type.body.lineHeight },
+  // No lineHeight: Fabric reuses native inputs, and a multiline field's line
+  // height leaks into the placeholder of a later single-line field, which then
+  // sits low and is cut off at the large text sizes.
+  inputMultiline: { minHeight: 110 },
   inputFocused: { borderColor: colors.ink },
   inputError: { borderColor: colors.errorText },
   inputOff: { backgroundColor: colors.surfaceSubtle, color: colors.textSecondary },

@@ -28,6 +28,8 @@ import {
   pressed,
   ripple,
   StaleNotice,
+  useLargeText,
+  useLineLimit,
 } from '@/components/ui';
 import { colors, radius, spacing, type } from '@/constants/theme';
 import { api } from '@/lib/api';
@@ -216,22 +218,30 @@ function Hub({
   onOpenKnowledge: () => void;
   onAdd: () => void;
 }) {
+  const twoLines = useLineLimit(2);
+  // At the accessibility sizes the avatar and the switch left the name a column
+  // too narrow for one word ("Answerin / g calls"), so the name and the status
+  // go under them there.
+  const stacked = useLargeText();
   const power = usePower(assistant, onChanged);
   const status = statusOf(power.enabled, assistant.number);
   const done = detail?.setup.items.filter((i) => i.done).length ?? 0;
   const total = detail?.setup.items.length ?? 0;
+  const identity = (
+    <>
+      <Text style={styles.hubName} numberOfLines={twoLines} accessibilityRole="header">
+        {assistant.name}
+      </Text>
+      <StatusLine status={status} connected={assistant.connected} />
+    </>
+  );
 
   return (
     <>
       <Card>
         <View style={styles.hubHead}>
           <AvatarRing size={56} mood={status.live ? 'friendly' : 'greeting'} status={status.ring} />
-          <View style={styles.flex}>
-            <Text style={styles.hubName} numberOfLines={2} accessibilityRole="header">
-              {assistant.name}
-            </Text>
-            <StatusLine status={status} connected={assistant.connected} />
-          </View>
+          <View style={styles.flex}>{stacked ? null : identity}</View>
           <PowerSwitch
             name={assistant.name}
             value={power.enabled}
@@ -239,6 +249,7 @@ function Hub({
             onChange={power.toggle}
           />
         </View>
+        {stacked ? <View style={styles.stackedIdentity}>{identity}</View> : null}
 
         {assistant.number ? (
           <NumberLine number={assistant.number} />
@@ -296,7 +307,12 @@ function KnowledgeRow({
   const preview = knowledge
     ? knowledge.digestPending
       ? 'Summarizing what it learned...'
-      : knowledge.digest || 'Nothing yet. Teach it your website or a few notes.'
+      : knowledge.digest ||
+        // As on the Knowledge screen: with notes or sources, no digest means the
+        // summary is not ready yet, not that there is nothing.
+        (knowledge.notes.trim() || sources > 0
+          ? 'It already uses what you added. The short summary is not ready yet.'
+          : 'Nothing yet. Teach it your website or a few notes.')
     : '';
 
   return (
@@ -336,8 +352,24 @@ function AssistantCard({
   onChanged: () => Promise<void>;
   onOpen: () => void;
 }) {
+  const oneLine = useLineLimit(1);
+  // The same squeeze as the hub's head, here from the chevron and the switch.
+  const stacked = useLargeText();
+  // There the switch also kept a column of its own down the whole card, which
+  // left the name and the opening line three quarters of the width. So at
+  // those sizes it sits at the avatar row's free end instead, and the row
+  // keeps room for it.
+  const [switchWidth, setSwitchWidth] = useState(0);
   const power = usePower(assistant, onChanged);
   const status = statusOf(power.enabled, assistant.number);
+  const identity = (
+    <>
+      <Text style={styles.cardName} numberOfLines={oneLine}>
+        {assistant.name}
+      </Text>
+      <StatusLine status={status} connected={assistant.connected} />
+    </>
+  );
 
   return (
     <Card>
@@ -352,16 +384,12 @@ function AssistantCard({
           android_ripple={ripple}
           style={({ pressed: down }) => [styles.cardMain, down && pressed]}
         >
-          <View style={styles.cardIdentity}>
+          <View style={[styles.cardIdentity, stacked && { paddingRight: switchWidth + spacing.md }]}>
             <AvatarRing size={48} mood={status.live ? 'friendly' : 'greeting'} status={status.ring} />
-            <View style={styles.flex}>
-              <Text style={styles.cardName} numberOfLines={1}>
-                {assistant.name}
-              </Text>
-              <StatusLine status={status} connected={assistant.connected} />
-            </View>
+            <View style={styles.flex}>{stacked ? null : identity}</View>
             <Icon name="chevron-forward" size={ICON.chevron} color={colors.textMuted} />
           </View>
+          {stacked ? <View style={styles.stackedIdentity}>{identity}</View> : null}
           {Boolean(assistant.greeting) && (
             <View style={styles.greeting}>
               <Text style={styles.greetingLabel}>Opening line</Text>
@@ -371,12 +399,19 @@ function AssistantCard({
             </View>
           )}
         </Pressable>
-        <PowerSwitch
-          name={assistant.name}
-          value={power.enabled}
-          busy={power.busy}
-          onChange={power.toggle}
-        />
+        {/* box-none: a tap beside the switch still reaches the card under it. */}
+        <View
+          style={stacked ? styles.cardSwitchStacked : null}
+          pointerEvents="box-none"
+          onLayout={stacked ? (e) => setSwitchWidth(e.nativeEvent.layout.width) : undefined}
+        >
+          <PowerSwitch
+            name={assistant.name}
+            value={power.enabled}
+            busy={power.busy}
+            onChange={power.toggle}
+          />
+        </View>
       </View>
 
       {assistant.number ? (
@@ -472,6 +507,7 @@ const styles = StyleSheet.create({
   },
   hubHead: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
   hubName: { ...type.heading },
+  stackedIdentity: { marginTop: spacing.md },
   statusLine: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -496,6 +532,9 @@ const styles = StyleSheet.create({
   cardHead: { flexDirection: 'row', alignItems: 'flex-start', gap: spacing.md },
   cardMain: { flex: 1 },
   cardIdentity: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
+  // At the accessibility sizes: over the avatar row's free end, level with the
+  // 48 pt avatar.
+  cardSwitchStacked: { position: 'absolute', top: 0, right: 0, height: 48, justifyContent: 'center' },
   cardName: { ...type.title },
   greeting: {
     marginTop: spacing.md,

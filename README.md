@@ -147,6 +147,8 @@ npm start
 | `EXPO_PUBLIC_API_URL` | Where the Next.js app is. Against a local `npm run dev`, use your machine's **LAN IP** (`http://192.168.x.x:3000`) - a phone or simulator cannot reach `localhost`. |
 | `EXPO_PUBLIC_SUPABASE_URL` | Same project as the web app |
 | `EXPO_PUBLIC_SUPABASE_ANON_KEY` | The publishable/anon key. Public by design. |
+| `EXPO_PUBLIC_REVENUECAT_ANDROID_KEY` | Android in-app purchases. The public RevenueCat SDK key (starts with `goog_`), never the `sk_` secret key. Preflight rejects a wrong prefix. |
+| `GOOGLE_SERVICES_JSON` | Android push. Path to the Firebase `google-services.json`; on EAS a `file` variable (`eas env:create --name GOOGLE_SERVICES_JSON --type file`). Not `EXPO_PUBLIC_`, so it is not embedded as a value. Locally, put the file in the project root instead. |
 
 Everything prefixed `EXPO_PUBLIC_` is embedded in the shipped binary and
 readable by anyone who downloads the app. The service-role key is never one of

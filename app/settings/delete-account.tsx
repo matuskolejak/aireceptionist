@@ -1,6 +1,6 @@
-import { useHeaderHeight } from '@react-navigation/elements';
-import { Stack } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { Stack, useNavigation, useRouter } from 'expo-router';
+import { useHeaderHeight } from 'expo-router/react-navigation';
+import { useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Keyboard,
@@ -21,6 +21,7 @@ import { usePurchases } from '@/context/PurchaseContext';
 import { api, ApiError } from '@/lib/api';
 import { APPLE_SUBSCRIPTIONS_URL, openExternal, PLAY_SUBSCRIPTIONS_URL } from '@/lib/links';
 import { isLiveStripe } from '@/lib/purchases';
+import { markSessionEnded } from '@/lib/session-ended';
 import type { BillingSnapshot } from '@/lib/types';
 
 /**
@@ -58,16 +59,30 @@ function storeManageUrl(store: Store): string {
   return store === 'apple' ? APPLE_SUBSCRIPTIONS_URL : PLAY_SUBSCRIPTIONS_URL();
 }
 
+// Whether a failed delete may still have gone through on the server, so that a
+// later 401 means the account is gone. Status 0 is a timeout, a lost connection
+// or a 200 that was not JSON (lib/api.ts). A 500 is definite: the server deletes
+// the auth user last, so its 500 means the user still exists. A 503 was not
+// processed. A 502 or 504 is a gateway that may have lost a finished delete.
+function outcomeUnknown(status: number): boolean {
+  return status === 0 || (status >= 500 && status !== 500 && status !== 503);
+}
+
 export default function DeleteAccountScreen() {
   const headerHeight = useHeaderHeight();
   const insets = useSafeAreaInsets();
   const keyboardUp = useKeyboardUp();
+  const router = useRouter();
+  const navigation = useNavigation();
   const { signOut } = useAuth();
   const { billing, refreshBilling, platformProvider, manage } = usePurchases();
 
   const [confirm, setConfirm] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Whether an earlier attempt on this screen may have deleted the account
+  // (see outcomeUnknown and onDelete).
+  const maybeDeleted = useRef(false);
 
   // The provider only loads billing when a store is available; ask directly so
   // the store warning shows in Expo Go and before setup as well.
@@ -77,7 +92,16 @@ export default function DeleteAccountScreen() {
 
   const store = liveStore(billing);
   const stripe = isLiveStripe(billing);
-  const armed = confirm === CONFIRM_WORD;
+  // Trimmed like the web form and the server: a keyboard suggestion adds a trailing space.
+  const armed = confirm.trim() === CONFIRM_WORD;
+
+  // Opened from the funnel: step back to it before the session goes. Signed
+  // out, this screen loses its guard, and Expo Router 58 would replace it with
+  // a NEW funnel on top of that one. From Settings the guards alone move on.
+  function backToFunnel() {
+    const state = navigation.getState();
+    if (state?.routes[state.index - 1]?.name === 'onboarding') router.back();
+  }
 
   function openManage(which: Store) {
     // manage() opens THIS platform's store only; a Google subscription viewed
@@ -97,9 +121,24 @@ export default function DeleteAccountScreen() {
       const res = await api.deleteAccount();
       remaining = res.storeSubscription ?? null;
     } catch (err) {
-      // A 401 means an earlier attempt already went through and the session no
-      // longer verifies - that is a deleted account, not a failure.
-      if (!(err instanceof ApiError && err.status === 401)) {
+      // A 401 means the session no longer verifies. After an earlier attempt
+      // whose outcome is unknown, that attempt may have gone through - that is
+      // a deleted account, not a failure. Otherwise the session had expired or
+      // was revoked, so nothing was deleted: sign out, and sign-in says the
+      // session ended.
+      const unauthorized = err instanceof ApiError && err.status === 401;
+      if (unauthorized && !maybeDeleted.current) {
+        markSessionEnded();
+        backToFunnel();
+        await signOut();
+        Alert.alert(
+          'You were signed out.',
+          'Your account was not deleted. Sign in again, then delete it from Settings.',
+        );
+        return;
+      }
+      if (!unauthorized) {
+        if (err instanceof ApiError && outcomeUnknown(err.status)) maybeDeleted.current = true;
         setError((err as Error).message || 'Could not delete your account. Try again.');
         setBusy(false);
         return;
@@ -108,6 +147,7 @@ export default function DeleteAccountScreen() {
 
     // Clears this install's traces of the account too. The navigation guards
     // then take the user back to the start.
+    backToFunnel();
     await signOut({ afterDeletion: true });
 
     if (remaining) {

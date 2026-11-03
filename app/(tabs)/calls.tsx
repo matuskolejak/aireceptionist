@@ -16,6 +16,7 @@ import {
 import { colors, spacing, type } from '@/constants/theme';
 import { api } from '@/lib/api';
 import {
+  callDuration,
   callerLabel,
   callHeadline,
   dayKey,
@@ -334,7 +335,7 @@ export default function CallsScreen() {
           }}
           onEndReachedThreshold={0.5}
           ListFooterComponent={
-            rows.length === 0 ? null : (
+            rows.length === 0 ? undefined : (
               <ListFooter
                 busy={Boolean(moreState?.busy)}
                 error={moreState?.error ?? null}
@@ -443,12 +444,13 @@ const LogRow = memo(function LogRow({
         : callHeadline({ outcome: row.outcome, status: row.status, date: row.date });
   const caller = callerLabel(row.from);
   const time = timeLabel(row.date, timezone) || row.dateLabel;
+  const duration = callDuration(row.durationLabel, bucket);
 
   return (
     <CallRow
       headline={headline}
       caller={caller}
-      meta={row.durationLabel}
+      meta={duration}
       when={time}
       bucket={bucket}
       outcome={row.outcome}
@@ -457,7 +459,7 @@ const LogRow = memo(function LogRow({
       onPress={openable ? () => onOpen(row.dbId as string) : undefined}
       // One sentence from exactly what is on screen. Without it VoiceOver reads
       // four fragments and the number digit by digit.
-      accessibilityLabel={`${headline}. ${caller}, ${row.durationLabel}, ${day} ${time}${
+      accessibilityLabel={`${headline}. ${caller}${duration ? `, ${duration}` : ''}, ${day} ${time}${
         row.needsReview ? ', flagged for review' : ''
       }`}
     />

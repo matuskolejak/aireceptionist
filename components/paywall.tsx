@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { Icon } from '@/components/Icon';
@@ -223,13 +223,17 @@ export function PaywallLegalLinks({
   if (onRestore) {
     items.push({ label: 'Restore purchases', onPress: onRestore, role: 'button', busy: restoreBusy });
   }
+  // No "·" between the links: the row wraps on a narrow phone and a dot would end a line.
   return (
     <View style={styles.legalRow}>
-      {items.map((item, i) => (
-        <Fragment key={item.label}>
-          {i > 0 ? <Text style={styles.dot} accessibilityElementsHidden importantForAccessibility="no">·</Text> : null}
-          <LinkButton label={item.label} onPress={item.onPress} role={item.role} busy={item.busy} />
-        </Fragment>
+      {items.map((item) => (
+        <LinkButton
+          key={item.label}
+          label={item.label}
+          onPress={item.onPress}
+          role={item.role}
+          busy={item.busy}
+        />
       ))}
     </View>
   );
@@ -308,7 +312,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     flexWrap: 'wrap',
-    gap: spacing.xs,
+    columnGap: spacing.md,
+    rowGap: spacing.xs,
   },
   link: {
     paddingHorizontal: spacing.xs,

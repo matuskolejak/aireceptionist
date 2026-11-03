@@ -7,6 +7,7 @@ import {
   StyleSheet,
   Text,
   View,
+  useWindowDimensions,
   type DimensionValue,
   type StyleProp,
   type TextStyle,
@@ -46,6 +47,20 @@ export const ICON = { chevron: 16, row: 18, action: 20 } as const;
 /** The pressed look every pressable shares, and its Android ripple. */
 export const pressed = { opacity: 0.7 } as const;
 export const ripple = { color: colors.hairline, foreground: true } as const;
+
+/**
+ * True at the iOS accessibility text sizes (AX1 is fontScale 1.79; the largest
+ * standard size is 1.35). There a line limit cuts what the owner must read (a
+ * number, a name, a time), and side-by-side buttons get too narrow.
+ */
+export function useLargeText(): boolean {
+  return useWindowDimensions().fontScale >= 1.7;
+}
+
+/** `lines` below the accessibility text sizes; no limit (0) at them, so the text wraps. */
+export function useLineLimit(lines: number): number {
+  return useLargeText() ? 0 : lines;
+}
 
 /** The card surface on its own, for the few places that cannot be a `Card` (a Pressable row card). */
 export const cardStyle = {
@@ -123,12 +138,13 @@ export function StatTile({
   onPress?: () => void;
   style?: StyleProp<ViewStyle>;
 }) {
+  const oneLine = useLineLimit(1);
   const warn = alert && typeof value === 'number' && value > 0;
   const a11yLabel = `${label}: ${value}`;
   const body = (
     <>
       <View style={styles.tileHead}>
-        <Text style={[styles.tileLabel, styles.flex]} numberOfLines={1}>
+        <Text style={[styles.tileLabel, styles.flex]} numberOfLines={oneLine}>
           {label}
         </Text>
         {/* The one tile that goes somewhere says so. */}
@@ -445,10 +461,11 @@ export function StaleNotice({
   /** Nothing was ever shown (the funnel's first load), so "the last update" would be a lie. */
   firstLoad?: boolean;
 }) {
+  const twoLines = useLineLimit(2);
   return (
     <View style={styles.stale} accessibilityLiveRegion="polite">
       <Icon name="cloud-offline-outline" size={14} color={colors.inkSoft} />
-      <Text style={styles.staleText} numberOfLines={2}>
+      <Text style={styles.staleText} numberOfLines={twoLines}>
         {message}
         {firstLoad ? '' : ' Showing the last update.'}
       </Text>
@@ -476,10 +493,21 @@ export function ErrorState({
   retryLabel = 'Try again',
 }: {
   message: string;
-  onRetry: () => void;
+  /** Return the try's promise to keep the button busy until it ends. */
+  onRetry: () => void | Promise<unknown>;
   title?: string;
   retryLabel?: string;
 }) {
+  // Busy until the try ends. Without it nothing on the card changed for up to
+  // 20 s, so people tapped again, and each tap started a new request that threw
+  // the last one's answer away.
+  const [busy, setBusy] = useState(false);
+  const retry = () => {
+    const out = onRetry();
+    if (!out) return;
+    setBusy(true);
+    void out.finally(() => setBusy(false));
+  };
   return (
     <View style={styles.empty}>
       <View style={[styles.emptyIcon, { backgroundColor: colors.errorSoft }]}>
@@ -489,7 +517,7 @@ export function ErrorState({
         {title}
       </Text>
       <Text style={styles.emptyBody}>{message}</Text>
-      <Button label={retryLabel} onPress={onRetry} variant="secondary" style={styles.emptyAction} />
+      <Button label={retryLabel} onPress={retry} busy={busy} variant="secondary" style={styles.emptyAction} />
     </View>
   );
 }
@@ -885,6 +913,14 @@ export function CallRow({
   accessibilityLabel?: string;
   accessibilityHint?: string;
 }) {
+  // At large text sizes one line cuts the caller and the summary. At the
+  // accessibility sizes two lines still cut the number, so useLineLimit
+  // lifts the limit there, and the time and the Review badge move under the
+  // caller: beside it they left the number so little width that it broke
+  // inside the digits ("555-11 / 02").
+  const { fontScale } = useWindowDimensions();
+  const lines = useLineLimit(fontScale > 1.2 ? 2 : 1);
+  const large = useLargeText();
   const look =
     bucket === 'unanswered' ? MISSED_LOOK : (OUTCOME_LOOK[outcome ?? ''] ?? OUTCOME_LOOK.resolved);
   const label =
@@ -899,22 +935,32 @@ export function CallRow({
       </View>
       <View style={styles.flex}>
         <View style={styles.callTitleRow}>
-          <Text style={styles.callTitle} numberOfLines={1}>
+          <Text style={styles.callTitle} numberOfLines={lines}>
             {headline}
           </Text>
           {unread ? <Dot color={colors.ink} size={6} /> : null}
         </View>
         <View style={styles.callMetaRow}>
-          <Text style={styles.callMeta} numberOfLines={1}>
+          <Text style={styles.callMeta} numberOfLines={lines}>
             {meta ? `${caller} · ${meta}` : caller}
           </Text>
-          {flagged ? <Badge label="Review" tone="warning" /> : null}
+          {flagged && !large ? <Badge label="Review" tone="warning" /> : null}
         </View>
+        {large ? (
+          <View style={styles.callWhenRow}>
+            <Text style={styles.callWhen}>{when}</Text>
+            {flagged ? <Badge label="Review" tone="warning" /> : null}
+          </View>
+        ) : null}
       </View>
-      <View style={styles.callRight}>
-        <Text style={styles.callWhen}>{when}</Text>
-        {onPress ? <Icon name="chevron-forward" size={ICON.chevron} color={colors.textMuted} /> : null}
-      </View>
+      {/* At large text a row with no chevron has nothing on the right, and an
+          empty column would still cost the caller the row's gap. */}
+      {large && !onPress ? null : (
+        <View style={styles.callRight}>
+          {large ? null : <Text style={styles.callWhen}>{when}</Text>}
+          {onPress ? <Icon name="chevron-forward" size={ICON.chevron} color={colors.textMuted} /> : null}
+        </View>
+      )}
     </>
   );
   if (!onPress) {
@@ -953,11 +999,16 @@ export function Row({
   valueStyle?: StyleProp<TextStyle>;
   onPress?: () => void;
 }) {
+  const oneLine = useLineLimit(1);
+  // Side by side, the label keeps its width and leaves the value a sliver at
+  // the accessibility sizes ("1 / o / f / 1"), so there the value goes under
+  // the label, as iOS value cells do.
+  const stacked = useLargeText();
   const a11yLabel = `${label}, ${value}`;
   const body = (
     <>
       <Text style={styles.rowLabel}>{label}</Text>
-      <Text style={[styles.rowValue, valueStyle]} numberOfLines={1}>
+      <Text style={[styles.rowValue, valueStyle]} numberOfLines={oneLine}>
         {value}
       </Text>
     </>
@@ -969,14 +1020,14 @@ export function Row({
         accessibilityRole="button"
         accessibilityLabel={a11yLabel}
         android_ripple={ripple}
-        style={({ pressed }) => [styles.row, pressed && styles.pressed]}
+        style={({ pressed }) => [styles.row, stacked && styles.rowStacked, pressed && styles.pressed]}
       >
         {body}
       </Pressable>
     );
   }
   return (
-    <View style={styles.row} accessible accessibilityLabel={a11yLabel}>
+    <View style={[styles.row, stacked && styles.rowStacked]} accessible accessibilityLabel={a11yLabel}>
       {body}
     </View>
   );
@@ -1009,6 +1060,7 @@ export function ListRow({
   disabled?: boolean;
   accessibilityHint?: string;
 }) {
+  const oneLine = useLineLimit(1);
   const off = Boolean(disabled || busy);
   const labelColor = destructive ? colors.errorText : colors.text;
   return (
@@ -1035,7 +1087,7 @@ export function ListRow({
       <View style={styles.flex}>
         <Text style={[styles.listLabel, { color: labelColor }]}>{label}</Text>
         {value ? (
-          <Text style={styles.listValue} numberOfLines={1}>
+          <Text style={styles.listValue} numberOfLines={oneLine}>
             {value}
           </Text>
         ) : null}
@@ -1128,7 +1180,7 @@ export const styles = StyleSheet.create({
     gap: 6,
   },
   buttonSpinner: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1298,6 +1350,7 @@ export const styles = StyleSheet.create({
     flexShrink: 1,
     fontFamily: fonts.medium,
   },
+  rowStacked: { flexDirection: 'column', alignItems: 'flex-start', gap: 2 },
   listRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1362,6 +1415,7 @@ export const styles = StyleSheet.create({
   callTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   callTitle: { ...type.body, fontFamily: fonts.semibold, flexShrink: 1 },
   callMetaRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: 2 },
+  callWhenRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: spacing.sm, marginTop: 2 },
   callMeta: { ...type.caption, flexShrink: 1 },
   callRight: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
   callWhen: { ...type.caption, fontVariant: ['tabular-nums'] },

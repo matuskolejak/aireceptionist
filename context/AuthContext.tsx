@@ -26,7 +26,6 @@ interface AuthValue {
   loading: boolean;
   email: string;
   name: string;
-  initials: string;
   configured: boolean;
   /** Emails a 6-digit code. Resolves to an error message, or null on success. */
   sendCode: (email: string) => Promise<string | null>;
@@ -49,11 +48,15 @@ interface AuthValue {
 const AuthContext = createContext<AuthValue | null>(null);
 
 // Mirrors lib/auth-user.ts on the web so the avatar in the app and the one in
-// the dashboard show the same two letters for the same account.
-function initialsFrom(name: string, email: string): string {
+// the dashboard show the same two letters for the same account. Array.from
+// splits by code point, so an emoji is not cut in half.
+export function initialsFrom(name: string, email: string): string {
   const source = name.trim() || email;
   const words = source.split(/[\s@.]+/).filter(Boolean);
-  const letters = words.length >= 2 ? words[0][0] + words[1][0] : source.slice(0, 2);
+  const letters =
+    words.length >= 2
+      ? Array.from(words[0])[0] + Array.from(words[1])[0]
+      : Array.from(source).slice(0, 2).join('');
   return letters.toUpperCase();
 }
 
@@ -307,7 +310,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       loading,
       email,
       name,
-      initials: initialsFrom(name, email),
       configured: supabaseConfigured || (__DEV__ && process.env.EXPO_PUBLIC_MOCK === '1'),
       sendCode,
       verifyCode,

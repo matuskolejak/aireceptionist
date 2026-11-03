@@ -64,6 +64,21 @@ function translateOnce(texts: string[], key: string): Promise<string[] | null> {
   return promise;
 }
 
+/**
+ * `texts` with an earlier translation reused for every text that was in the
+ * translated batch, matched by its words, not its place: a message taken
+ * during a live call goes in before the turns, so every turn moves one place.
+ * A text seen twice (a "Sí." turn) takes the translation of its last copy.
+ */
+export function reuseByText(texts: string[], originals: string[], translated: string[]): string[] {
+  const known = new Map<string, string>();
+  originals.forEach((original, i) => {
+    const out = translated[i];
+    if (out !== undefined) known.set(original, out);
+  });
+  return texts.map((t) => known.get(t) ?? t);
+}
+
 export function useTranslated(
   texts: string[],
   { enabled = true, debounceMs = 0 }: { enabled?: boolean; debounceMs?: number } = {},
@@ -125,14 +140,11 @@ export function useTranslated(
 
   const current = ready && ready.key === key ? ready : null;
   // While newer content is pending, reuse the last translation for every text
-  // that is still word for word what was translated.
+  // that is still word for word what was translated, wherever it sits now.
   const earlier = !current && key && ready?.texts ? ready : null;
   let shown = texts;
   if (current?.texts) shown = current.texts;
-  else if (earlier?.texts) {
-    const prior = earlier.texts;
-    shown = texts.map((t, i) => (earlier.originals[i] === t ? (prior[i] ?? t) : t));
-  }
+  else if (earlier?.texts) shown = reuseByText(texts, earlier.originals, earlier.texts);
   return {
     texts: shown,
     translating: Boolean(key) && !current && !earlier,

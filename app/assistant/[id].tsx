@@ -49,12 +49,15 @@ import {
   pressed,
   ripple,
   StaleNotice,
+  useLargeText,
+  useLineLimit,
 } from '@/components/ui';
 import { colors, fonts, MAX_FONT_SCALE, radius, spacing, type } from '@/constants/theme';
 import { api, ApiError } from '@/lib/api';
 import { formatPhone } from '@/lib/format';
 
 import { countryForLocale, deviceTimeZone } from '@/lib/locale';
+import { dialable, isValidPhone } from '@/lib/phone';
 import {
   SECTION,
   type AssistantDetail,
@@ -82,16 +85,6 @@ import { useQuery } from '@/lib/use-query';
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
-/**
- * What the call engine accepts as a destination, matching E164 in
- * lib/call-engine/escalation.ts. A number stored in any other shape is written
- * happily and then dropped on the way back out, so the destination vanishes
- * after a save that reported success. It has to be caught here, while the
- * operator can still see the field.
- */
-const E164 = /^\+[1-9]\d{6,15}$/;
-const dialable = (n: string) => n.replace(/[\s().-]/g, '');
-
 /** The number the last test call rang, so the next one is a single tap. Keychain, not AsyncStorage: it is a phone number. */
 const LAST_TEST_NUMBER_KEY = 'testcall.last';
 
@@ -107,6 +100,10 @@ type SheetKey =
   | null;
 
 export default function AssistantDetailScreen() {
+  const twoLines = useLineLimit(2);
+  // At the accessibility sizes the name and the status go under the avatar and
+  // the switch: beside them they broke inside a word ("Answerin / g calls").
+  const stacked = useLargeText();
   const { id } = useLocalSearchParams<{ id: string }>();
   const navigation = useNavigation();
   const router = useRouter();
@@ -142,6 +139,11 @@ export default function AssistantDetailScreen() {
     fromPaywall.current = true;
     router.push({ pathname: '/paywall', params: { reason: 'number' } });
   }, [router]);
+  // A subscriber at the number limit gets "Plans", not "Subscribe to get a phone number".
+  const openPlans = useCallback(() => {
+    fromPaywall.current = true;
+    router.push('/paywall');
+  }, [router]);
 
   const refreshVoices = voices.refresh;
   const pull = useCallback(async () => {
@@ -172,7 +174,10 @@ export default function AssistantDetailScreen() {
   function confirmDelete() {
     Alert.alert(
       'Delete this receptionist?',
-      'Its number is released and the transcript history stays. This cannot be undone.',
+      // Only a linked number is released; without one the line would promise nothing.
+      data?.number
+        ? 'Its number is released and the transcript history stays. This cannot be undone.'
+        : 'The transcript history stays. This cannot be undone.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -212,6 +217,17 @@ export default function AssistantDetailScreen() {
   const isDone = (key: string) => data.setup.items.find((i) => i.key === key)?.done ?? false;
   const setupDone = data.setup.items.filter((i) => i.done).length;
   const setupTotal = data.setup.items.length;
+  const identity = (
+    <>
+      <Text style={styles.heroName} numberOfLines={twoLines} accessibilityRole="header">
+        {data.name}
+      </Text>
+      <View style={styles.statusLine}>
+        <Text style={[styles.statusText, { color: status.color }]}>{status.text}</Text>
+        {!data.connected && <Badge label="Not synced" tone="warning" />}
+      </View>
+    </>
+  );
 
   const languageName =
     voices.data?.languages.find((l) => l.code === data.language)?.name ?? data.language;
@@ -249,15 +265,7 @@ export default function AssistantDetailScreen() {
         <Card>
           <View style={styles.heroHead}>
             <AvatarRing size={56} mood={status.live ? 'friendly' : 'greeting'} status={status.ring} />
-            <View style={styles.flex}>
-              <Text style={styles.heroName} numberOfLines={2} accessibilityRole="header">
-                {data.name}
-              </Text>
-              <View style={styles.statusLine}>
-                <Text style={[styles.statusText, { color: status.color }]}>{status.text}</Text>
-                {!data.connected && <Badge label="Not synced" tone="warning" />}
-              </View>
-            </View>
+            <View style={styles.flex}>{stacked ? null : identity}</View>
             <PowerSwitch
               name={data.name}
               value={power.enabled}
@@ -265,8 +273,9 @@ export default function AssistantDetailScreen() {
               onChange={power.toggle}
             />
           </View>
+          {stacked ? <View style={styles.stackedIdentity}>{identity}</View> : null}
 
-          <NumberBlock detail={data} onChanged={refresh} onSubscribe={openPaywall} />
+          <NumberBlock detail={data} onChanged={refresh} onSubscribe={openPaywall} onUpgrade={openPlans} />
 
           {setupTotal > 0 && setupDone < setupTotal ? (
             <SetupProgress done={setupDone} total={setupTotal} />
@@ -456,10 +465,12 @@ function NumberBlock({
   detail,
   onChanged,
   onSubscribe,
+  onUpgrade,
 }: {
   detail: AssistantDetail;
   onChanged: () => Promise<void>;
   onSubscribe: () => void;
+  onUpgrade: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   // The phone's region first, the way the web preselects by locale - never
@@ -487,32 +498,42 @@ function NumberBlock({
       if (code === 'plan_required') onSubscribe();
       else if (code === 'sandbox') {
         Alert.alert('No live number on a test purchase', 'Test purchases do not include a live phone number.');
-      } else if (code === 'limit_reached') Alert.alert('Number limit reached', message);
-      else Alert.alert('Could not get a number', message);
+      } else if (code === 'limit_reached') {
+        // The message says "Upgrade to add more", so the alert offers the way there.
+        Alert.alert('Number limit reached', message, [
+          { text: 'Not now', style: 'cancel' },
+          { text: 'See plans', onPress: onUpgrade },
+        ]);
+      } else Alert.alert('Could not get a number', message);
     } finally {
       setBusy(false);
     }
   }
 
   function confirmUnlink() {
-    Alert.alert('Unlink this number?', 'Calls to it stop being answered immediately.', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Unlink',
-        style: 'destructive',
-        onPress: async () => {
-          setBusy(true);
-          try {
-            await api.unlinkAssistantNumber(detail.id);
-            await onChanged();
-          } catch (err) {
-            Alert.alert('Could not unlink', (err as Error).message);
-          } finally {
-            setBusy(false);
-          }
+    // Like the web: an unlinked number goes back to the pool, so "Get a number" may give another one.
+    Alert.alert(
+      'Unlink this number?',
+      'Calls to it stop being answered right away. You can get a number again here, but it may be a different number.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Unlink',
+          style: 'destructive',
+          onPress: async () => {
+            setBusy(true);
+            try {
+              await api.unlinkAssistantNumber(detail.id);
+              await onChanged();
+            } catch (err) {
+              Alert.alert('Could not unlink', (err as Error).message);
+            } finally {
+              setBusy(false);
+            }
+          },
         },
-      },
-    ]);
+      ],
+    );
   }
 
   if (!detail.number) {
@@ -734,7 +755,7 @@ function TestCallSheet({
         label="Your number"
         value={to}
         onChangeText={setTo}
-        placeholder="+1 555 123 4567"
+        placeholder="+1 415 555 0132"
         keyboardType="phone-pad"
         autoCapitalize="none"
         autoComplete="tel"
@@ -866,6 +887,8 @@ function BasicsSheet({ visible, detail, onClose, onSave }: SheetProps) {
   }, [visible, detail.name, detail.greeting]);
 
   const dirty = name !== detail.name || greeting !== detail.greeting;
+  const blankName = !name.trim();
+  const blankGreeting = !greeting.trim();
 
   return (
     <Sheet
@@ -880,7 +903,7 @@ function BasicsSheet({ visible, detail, onClose, onSave }: SheetProps) {
             submit({ sections: [SECTION.basics], fields: { name, greeting } })
           }
           busy={busy}
-          dirty={canSave(dirty)}
+          dirty={canSave(dirty) && !blankName && !blankGreeting}
           state={state}
         />
       }
@@ -888,6 +911,7 @@ function BasicsSheet({ visible, detail, onClose, onSave }: SheetProps) {
       <TextField
         label="Its name"
         value={name}
+        error={blankName ? 'Give it a name.' : undefined}
         onChangeText={setName}
         placeholder="Receptionist"
         // The same truth the setup funnel tells: the name is a label for you.
@@ -896,6 +920,7 @@ function BasicsSheet({ visible, detail, onClose, onSave }: SheetProps) {
       <TextField
         label="Opening line"
         value={greeting}
+        error={blankGreeting ? 'Callers need an opening line. Write a short one.' : undefined}
         onChangeText={setGreeting}
         placeholder="Thanks for calling Bright Dental, how can I help?"
         multiline
@@ -1249,7 +1274,9 @@ function EscalationSheet({ visible, detail, onClose, onSave }: SheetProps) {
   const started = (t: (typeof targets)[number]) =>
     Boolean(t.label.trim() || dialable(t.number) || t.when.trim() || t.hours);
   const filled = targets.filter(started);
-  const badTarget = filled.some((t) => !E164.test(dialable(t.number)));
+  // The server refuses a number the call engine cannot dial (the rule is in
+  // lib/phone.ts), so a bad one is caught here, while the field is on screen.
+  const badTarget = filled.some((t) => !isValidPhone(t.number));
   const storedSla = detail.escalation.callbackSlaMinutes
     ? String(detail.escalation.callbackSlaMinutes)
     : '';
@@ -1347,12 +1374,12 @@ function EscalationSheet({ visible, detail, onClose, onSave }: SheetProps) {
             label="Number"
             value={t.number}
             onChangeText={(v) => patch(i, { number: v })}
-            placeholder="+1 555 123 4567"
+            placeholder="+1 415 555 0132"
             keyboardType="phone-pad"
             autoCapitalize="none"
             error={
-              started(t) && !E164.test(dialable(t.number))
-                ? 'Include the country code, like +1 555 123 4567.'
+              started(t) && !isValidPhone(t.number)
+                ? 'Enter the full number with the country code, like +1 415 555 0132.'
                 : undefined
             }
           />
@@ -1434,6 +1461,7 @@ function HoursSheet({ visible, detail, onClose, onSave }: SheetProps) {
     // The days only reach the server while the switch is on, so a stale week
     // behind an off switch is not an unsaved edit.
     (on && JSON.stringify(days) !== JSON.stringify(stored?.days ?? []));
+  const noDay = on && days.every((d) => !d);
 
   if (!primary) {
     return (
@@ -1489,7 +1517,7 @@ function HoursSheet({ visible, detail, onClose, onSave }: SheetProps) {
       visible={visible}
       title="When transfers are allowed"
       onClose={() => confirmClose(dirty)}
-      footer={<SaveBar onSave={() => submit(build())} busy={busy} dirty={canSave(dirty)} state={state} />}
+      footer={<SaveBar onSave={() => submit(build())} busy={busy} dirty={canSave(dirty) && !noDay} state={state} />}
     >
       <SwitchRow
         title="Only transfer at certain hours"
@@ -1499,6 +1527,11 @@ function HoursSheet({ visible, detail, onClose, onSave }: SheetProps) {
       />
       {on && (
         <View style={{ marginTop: spacing.sm }}>
+          {noDay && (
+            <Text style={[styles.sheetHint, { color: colors.errorText }]}>
+              Pick at least one day, or turn this off to allow transfers at any time.
+            </Text>
+          )}
           {DAYS.map((label, i) => {
             const day = days[i];
             return (
@@ -1905,8 +1938,8 @@ function describeGuardrails(detail: AssistantDetail): string {
 
 function describeAlerts(detail: AssistantDetail): string {
   const parts: string[] = [];
-  if (detail.smsAlerts) parts.push('Texts messages');
-  if (detail.emailTranscripts.enabled && detail.emailTranscripts.to) parts.push('Emails transcripts');
+  if (detail.smsAlerts) parts.push('Text alerts');
+  if (detail.emailTranscripts.enabled && detail.emailTranscripts.to) parts.push('Email transcripts');
   return parts.length ? parts.join(' · ') : 'Nothing sent after a call';
 }
 
@@ -1916,6 +1949,7 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   heroHead: { flexDirection: 'row', alignItems: 'center', gap: spacing.md },
   heroName: { ...type.heading },
+  stackedIdentity: { marginTop: spacing.md },
   statusLine: {
     flexDirection: 'row',
     alignItems: 'center',

@@ -1,7 +1,8 @@
-import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useEffect, useState, type ReactNode } from 'react';
+import { useCanGoBack, useLocalSearchParams, useRouter } from 'expo-router';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
+  AppState,
   Image,
   KeyboardAvoidingView,
   Platform,
@@ -22,6 +23,7 @@ import {
   control,
   fonts,
   MAX_FONT_SCALE,
+  MAX_TITLE_SCALE,
   radius,
   spacing,
   type,
@@ -29,11 +31,15 @@ import {
 import { useAuth } from '@/context/AuthContext';
 import { apiConfigured } from '@/lib/api';
 import { appleAuthModule, isAvailable, signInWithAppleNative } from '@/lib/apple-auth';
+import { secondsLeft } from '@/lib/cooldown';
 import { openInApp, PRIVACY_URL, TERMS_URL } from '@/lib/links';
 import type { OAuthProvider } from '@/lib/oauth';
 import { sessionEnded } from '@/lib/session-ended';
 
 const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+// Seconds before "Send a new code" works again. Supabase's default email OTP
+// limit is one email per 60 s, so an earlier tap would only fail.
+const RESEND_SECONDS = 60;
 
 /**
  * Sign in / sign up, mirroring the web's auth dialog.
@@ -55,8 +61,9 @@ const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 export default function SignInScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const canGoBack = useCanGoBack();
   const { next } = useLocalSearchParams<{ next?: string }>();
-  const { sendCode, verifyCode, signInWithProvider, configured } = useAuth();
+  const { session, sendCode, verifyCode, signInWithProvider, configured } = useAuth();
 
   const [email, setEmail] = useState('');
   const [code, setCode] = useState('');
@@ -65,6 +72,12 @@ export default function SignInScreen() {
   const [sent, setSent] = useState(false);
   // Whether a code went out this time - only then can the subtitle say so.
   const [codeRequested, setCodeRequested] = useState(false);
+  // Seconds left before another code can go out. Counted from a deadline set
+  // on each send, so time in the background (timers paused) still counts.
+  const [cooldown, setCooldown] = useState(0);
+  const [resendAt, setResendAt] = useState(0);
+  // A new code went out from the code step: say so until the next action.
+  const [resent, setResent] = useState(false);
   // One field rather than a boolean per button: only one of these can be in
   // flight, and the others have to disable while it is.
   const [pending, setPending] = useState<OAuthProvider | 'email' | 'verify' | null>(null);
@@ -72,6 +85,22 @@ export default function SignInScreen() {
   // Opened because the API refused the session (lib/use-query.ts): say so,
   // once, instead of a "Welcome" to someone who was mid-task a second ago.
   const [expired] = useState(sessionEnded);
+
+  // Leave once a session lands, whichever way it came: back to the funnel that
+  // opened this screen (still mounted, mid-step), or home when nothing is
+  // under it - also when the funnel goes before the back runs (a finished
+  // setup removes it). The root layout does not guard this screen (see there).
+  const signedIn = session !== null;
+  const left = useRef(false);
+  useEffect(() => {
+    if (!signedIn) return;
+    if (!left.current && canGoBack) {
+      left.current = true;
+      router.back();
+    } else if (!canGoBack) {
+      router.replace('/');
+    }
+  }, [signedIn, canGoBack, router]);
 
   // iOS: Apple's own button when the native flow is available. null while the
   // check runs, so the slot keeps its height instead of the list jumping.
@@ -88,6 +117,26 @@ export default function SignInScreen() {
       alive = false;
     };
   }, [appleNative]);
+
+  const coolingDown = cooldown > 0;
+  useEffect(() => {
+    if (!resendAt) return;
+    let id: ReturnType<typeof setInterval> | undefined;
+    const tick = () => {
+      const left = secondsLeft(resendAt);
+      setCooldown(left);
+      if (left === 0) clearInterval(id);
+    };
+    id = setInterval(tick, 1000);
+    // iOS pauses JS timers in the background: catch up on return.
+    const sub = AppState.addEventListener('change', (s) => {
+      if (s === 'active') tick();
+    });
+    return () => {
+      clearInterval(id);
+      sub.remove();
+    };
+  }, [resendAt]);
 
   const emailValid = EMAIL.test(email.trim());
   // Mock mode (dev only) has no .env to fill in. Inline, so a release build
@@ -135,6 +184,19 @@ export default function SignInScreen() {
     if (err) return;
     setCodeRequested(true);
     setSent(true);
+    setCooldown(RESEND_SECONDS);
+    setResendAt(Date.now() + RESEND_SECONDS * 1000);
+  }
+
+  async function onResend() {
+    setResent(false);
+    // Same call as onSend; a failure shows in the error notice like a first send.
+    const err = await run('email', () => sendCode(email));
+    if (err) return;
+    setCodeRequested(true);
+    setResent(true);
+    setCooldown(RESEND_SECONDS);
+    setResendAt(Date.now() + RESEND_SECONDS * 1000);
   }
 
   function openCodeStep() {
@@ -145,8 +207,8 @@ export default function SignInScreen() {
 
   async function onVerify() {
     if (code.trim().length < 6) return setError('Enter the 6-digit code.');
-    // No navigation here: the root layout's guards move on as soon as the
-    // session lands, so redirecting from both places would double-push.
+    // No navigation here: the effect at the top leaves as soon as the session
+    // lands, so navigating from both places would go back twice.
     await run('verify', () => verifyCode(email, code));
   }
 
@@ -196,7 +258,9 @@ export default function SignInScreen() {
 
   return (
     <KeyboardAvoidingView
-      style={styles.flex}
+      // The top inset sits here, outside the ScrollView, so scrolled content
+      // stops under the status bar instead of running behind the clock.
+      style={[styles.flex, { paddingTop: insets.top }]}
       // `padding` on both platforms: app.json turns on edge-to-edge, which
       // disables Android's adjustResize, so the window no longer shrinks for
       // the keyboard on its own and the email field would sit under it.
@@ -205,7 +269,7 @@ export default function SignInScreen() {
       <ScrollView
         contentContainerStyle={[
           styles.body,
-          { paddingTop: insets.top + spacing.xl, paddingBottom: insets.bottom + spacing.xl },
+          { paddingTop: spacing.xl, paddingBottom: insets.bottom + spacing.xl },
         ]}
         keyboardShouldPersistTaps="handled"
       >
@@ -216,7 +280,7 @@ export default function SignInScreen() {
           accessibilityElementsHidden
           importantForAccessibility="no"
         />
-        <Text style={styles.title} accessibilityRole="header">
+        <Text style={styles.title} accessibilityRole="header" maxFontSizeMultiplier={MAX_TITLE_SCALE}>
           {expired ? 'Welcome back' : 'Welcome'}
         </Text>
         <Text style={styles.subtitle}>
@@ -243,6 +307,12 @@ export default function SignInScreen() {
           </Notice>
         )}
 
+        {resent && !error && (
+          <Notice tone="success" live style={styles.notice}>
+            {`We sent a new code to ${email.trim()}.`}
+          </Notice>
+        )}
+
         {sent ? (
           <>
             <CodeInput
@@ -263,6 +333,13 @@ export default function SignInScreen() {
               style={styles.action}
             />
             <TextLink
+              label={coolingDown ? `Send a new code in ${cooldown} s` : 'Send a new code'}
+              tone="secondary"
+              disabled={notConfigured || busy || coolingDown}
+              style={styles.textLink}
+              onPress={() => void onResend()}
+            />
+            <TextLink
               label="Use a different email"
               tone="secondary"
               disabled={busy}
@@ -271,6 +348,7 @@ export default function SignInScreen() {
                 setSent(false);
                 setCode('');
                 setError(null);
+                setResent(false);
               }}
             />
           </>
@@ -329,7 +407,7 @@ export default function SignInScreen() {
             and changed their mind - on the code step too, so returning is one
             tap rather than two. Only shown when there is something to go back
             to: `router.back()` on a root screen does nothing. */}
-        {router.canGoBack() && (
+        {canGoBack && (
           <TextLink
             label="Back to setup"
             tone="secondary"
@@ -572,7 +650,7 @@ const styles = StyleSheet.create({
     height: control.lg,
   },
   appleSpinner: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -614,6 +692,7 @@ const styles = StyleSheet.create({
   },
   // The stat size, medium weight, no lineHeight (a single-line iOS TextInput
   // sits off centre with one).
+  // No letterSpacing: Fabric reuses the native input and the kern leaks into later placeholders.
   codeInput: {
     minHeight: 56,
     borderRadius: radius.md,
@@ -624,7 +703,6 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
     fontFamily: fonts.medium,
     fontSize: type.stat.fontSize,
-    letterSpacing: 8,
     textAlign: 'center',
     fontVariant: ['tabular-nums'],
     color: colors.text,

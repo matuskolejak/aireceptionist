@@ -1,7 +1,18 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import * as Crypto from 'expo-crypto';
 import { AppState } from 'react-native';
 
 import { AUTH_STORAGE_KEY, secureStorage } from './secure-storage';
+
+// React Native has no global `crypto`, so Supabase made the PKCE verifier with
+// Math.random(). expo-crypto's getRandomValues reads the OS secure random
+// source. Only this function is added: a `crypto.subtle` with digest alone
+// would turn the challenge into SHA-256, but auth.getClaims() would then call
+// subtle.importKey, which expo-crypto does not have. So the challenge stays
+// "plain", and Supabase still warns "WebCrypto API is not supported".
+const webCrypto = ((globalThis as { crypto?: { getRandomValues?: typeof Crypto.getRandomValues } })
+  .crypto ??= {});
+webCrypto.getRandomValues ??= Crypto.getRandomValues;
 
 const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL ?? '';
 const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? '';

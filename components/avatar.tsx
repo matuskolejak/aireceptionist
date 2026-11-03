@@ -452,7 +452,7 @@ export function AvatarRing({
 const styles = StyleSheet.create({
   fill: { width: '100%', height: '100%' },
   ringFace: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     alignItems: 'center',
     justifyContent: 'center',
   },

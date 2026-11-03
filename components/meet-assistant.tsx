@@ -1,12 +1,22 @@
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import * as Haptics from 'expo-haptics';
 import { useEffect, useImperativeHandle, useMemo, useRef, useState, type Ref } from 'react';
-import { Dimensions, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import {
+  Dimensions,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+  type ScrollViewInstance,
+  type TextInputInstance,
+} from 'react-native';
 
 import { inputStyleLg, SearchField } from '@/components/form';
-import { Actions, Ask, Pill } from '@/components/funnel';
+import { Actions, Ask, Pill, StepScroll } from '@/components/funnel';
 import { Icon, type IconName } from '@/components/Icon';
-import { ICON, IconButton } from '@/components/ui';
+import { ICON, IconButton, useLineLimit } from '@/components/ui';
 import { colors, control, fonts, radius, spacing, type } from '@/constants/theme';
 import { countryForLocale } from '@/lib/locale';
 import { isValidAlertPhone } from '@/lib/onboarding-draft';
@@ -21,6 +31,7 @@ import {
   type Mood,
 } from '@/lib/personality';
 import type { Catalog, OnboardingState } from '@/lib/types';
+import { looksLikeWebsite } from '@/lib/website';
 
 /**
  * Step 1, as the website does it: not a form, but meeting the receptionist.
@@ -87,8 +98,8 @@ const NAME_IDEAS: Record<'f' | 'm', readonly string[]> = {
  * prefix read as a format the field wanted.
  */
 const PHONE_EXAMPLES: Record<string, string> = {
-  US: '(555) 123-4567',
-  CA: '(555) 123-4567',
+  US: '(415) 555-0132',
+  CA: '(416) 555-0132',
   GB: '7700 900123',
   IE: '85 123 4567',
   NL: '6 12345678',
@@ -107,8 +118,6 @@ const PHONE_EXAMPLES: Record<string, string> = {
   CZ: '601 123 456',
   SK: '903 123 456',
 };
-
-const PHONE_ERROR = 'Include the country code, e.g. +44 7700 900123';
 
 export interface BasicsValues {
   companyName: string;
@@ -175,6 +184,12 @@ export function MeetAssistant({
   const [business, setBusiness] = useState(cfg.companyName);
   const [website, setWebsite] = useState(cfg.companyWebsite);
   /**
+   * Whether the website error may show: once the field has lost focus, or at
+   * once for a saved answer. Checked from the first keystroke, it called "b"
+   * through "brightdental.co" wrong while the owner was still typing.
+   */
+  const [siteTouched, setSiteTouched] = useState(cfg.companyWebsite.trim().length > 0);
+  /**
    * The website field, so the business field's return key can move focus INTO
    * it. Both fields used to declare `returnKeyType="next"` and then call
    * `advance`, so the keyboard's Next key - the obvious thing to press with a
@@ -182,20 +197,20 @@ export function MeetAssistant({
    * and jumped to the next screen. A return key that says "next" has to mean
    * the next field while there still is one.
    */
-  const websiteRef = useRef<TextInput>(null);
+  const websiteRef = useRef<TextInputInstance>(null);
   /**
    * The other half of that. The website field's Done key sends focus BACK here
    * when neither answer has been given yet, rather than only dismissing the
    * keyboard and reflowing the screen with nothing said about why.
    */
-  const businessRef = useRef<TextInput>(null);
+  const businessRef = useRef<TextInputInstance>(null);
   /**
    * The answer zone, so focusing the website field scrolls it and the line
    * under it into view. The keyboard is already up when that happens - the
    * business field autofocuses - so no keyboard event fires and nothing else
    * would bring the bottom of the step on screen.
    */
-  const scroller = useRef<ScrollView>(null);
+  const scroller = useRef<ScrollViewInstance>(null);
   const [name, setName] = useState(cfg.assistantName);
   // The phone's own region before the first country in the list: an Irish
   // phone wants an Irish number, and the list starts with the US.
@@ -210,7 +225,7 @@ export function MeetAssistant({
     () => splitPhone(cfg.alertPhone, cfg.country || country, dials).local,
   );
   const [phoneError, setPhoneError] = useState<string | null>(null);
-  const dialStrip = useRef<ScrollView>(null);
+  const dialStrip = useRef<ScrollViewInstance>(null);
   const dialShown = useRef(false);
 
   // A saved number only resolves into a prefix once the catalogue lands. Once,
@@ -286,8 +301,10 @@ export function MeetAssistant({
   const voice = voices.find((v) => v.voiceId === voiceId) ?? null;
   // Step 1 needs something to answer as: a business name, or a website the
   // assistant can take one from (the provisioner derives the name from the
-  // domain when only a site was given, as the web does).
-  const hasBusiness = business.trim().length > 0 || website.trim().length > 0;
+  // domain when only a site was given, as the web does). Plain words in the
+  // site box are not a site: the server would name the business "My company".
+  const siteOk = looksLikeWebsite(website);
+  const hasBusiness = business.trim().length > 0 || siteOk;
   // Scoped to the question that has a required answer. The guard used to cover
   // all five, which is invisible going forwards - you cannot reach question 2
   // without answering question 1 - but backing INTO step 1 lands on the LAST
@@ -349,6 +366,10 @@ export function MeetAssistant({
     setPreview(null);
     // The dial strip is rebuilt on the way back in; bring its pick into view again.
     if (next === LAST) dialShown.current = false;
+    // One scroll serves every question, so a new one starts at its top rather
+    // than where the last was left. At the accessibility sizes the question is
+    // inside the scroll (StepScroll) and would otherwise start out of view.
+    scroller.current?.scrollTo({ y: 0, animated: false });
     setStep(next);
   }
 
@@ -363,7 +384,15 @@ export function MeetAssistant({
     // The server refuses the whole of step 1 over a malformed number, so it
     // is caught here, on the question, while it is still on screen.
     if (phoneLocal.trim() && !isValidAlertPhone(joinedPhone)) {
-      setPhoneError(PHONE_ERROR);
+      // The example follows the chosen chip: a UK example under +1 read as
+      // the format the field wanted.
+      const dial = dials.find((d) => d.code === phoneCode)?.dial ?? '';
+      const example = PHONE_EXAMPLES[phoneCode];
+      setPhoneError(
+        dial && example
+          ? `Enter the full number, like ${dial} ${example}.`
+          : 'Enter the full number, with the area code.',
+      );
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       return;
     }
@@ -449,18 +478,19 @@ export function MeetAssistant({
         setGaze(e.nativeEvent.pageX < Dimensions.get('window').width / 2 ? -1 : 1)
       }
     >
-      <Ask
-        mood={mood}
-        name={name}
-        question={current.q}
-        sub={current.sub}
-        nudge={nudge}
-        talking={talking}
-        gaze={gaze}
-      />
-
-      <ScrollView
-        ref={scroller}
+      <StepScroll
+        ask={
+          <Ask
+            mood={mood}
+            name={name}
+            question={current.q}
+            sub={current.sub}
+            nudge={nudge}
+            talking={talking}
+            gaze={gaze}
+          />
+        }
+        scrollRef={scroller}
         style={styles.flex}
         contentContainerStyle={styles.content}
         keyboardShouldPersistTaps="handled"
@@ -501,7 +531,11 @@ export function MeetAssistant({
               ref={websiteRef}
               style={[styles.input, styles.websiteInput]}
               value={website}
-              onChangeText={setWebsite}
+              onChangeText={(t) => {
+                setWebsite(t);
+                // Text with an inner space can never become a site, so say so at once.
+                if (/\s/.test(t.trim())) setSiteTouched(true);
+              }}
               placeholder="e.g. brightdental.com"
               placeholderTextColor={colors.textMuted}
               accessibilityLabel="Website, optional"
@@ -518,11 +552,17 @@ export function MeetAssistant({
               // keyboard up, and the keyboard is already up when focus lands
               // here, so nothing else brings them into view.
               onFocus={() => scroller.current?.scrollToEnd({ animated: true })}
+              onBlur={() => setSiteTouched(true)}
               onSubmitEditing={() => {
                 if (hasBusiness) return advance();
                 businessRef.current?.focus();
               }}
             />
+            {siteTouched && !business.trim() && website.trim() && !siteOk ? (
+              <Text style={styles.error} accessibilityLiveRegion="polite">
+                Enter a web address like example.com, or type the business name above.
+              </Text>
+            ) : null}
             <Text style={styles.hint}>Either one is enough.</Text>
 
             {/* The best sentence on this screen: the reason to fill the field
@@ -530,12 +570,12 @@ export function MeetAssistant({
                 question 5 confirms a transfer number. */}
             <View style={styles.outcomeRow}>
               <Icon
-                name={website.trim() ? 'checkmark-circle' : 'sparkles-outline'}
+                name={siteOk ? 'checkmark-circle' : 'sparkles-outline'}
                 size={ICON.row}
-                color={website.trim() ? colors.successText : colors.ink}
+                color={siteOk ? colors.successText : colors.ink}
               />
               <Text style={styles.outcomeText}>
-                I read {website.trim() || 'it'} before your first call, so I already know your
+                I read {siteOk ? website.trim() : 'it'} before your first call, so I already know your
                 services.
               </Text>
             </View>
@@ -755,7 +795,7 @@ export function MeetAssistant({
 
         {/* Parked in the slack rather than under the answer - see `SoFar`. */}
         <SoFar items={soFar} />
-      </ScrollView>
+      </StepScroll>
 
       <Actions
         primary={{
@@ -766,6 +806,12 @@ export function MeetAssistant({
           label: 'Continue',
           onPress: advance,
           disabled: !canAdvance,
+          // The website error waits for blur, and the keyboard can still be up:
+          // a press here shows it, or points to the name box when both are empty.
+          onBlockedPress: () => {
+            setSiteTouched(true);
+            if (!website.trim()) businessRef.current?.focus();
+          },
           busy,
         }}
         onBack={step > 0 ? () => go(step - 1) : undefined}
@@ -880,6 +926,7 @@ function usePreviewPlayer(url: string | null, onEnd: () => void): boolean {
  * while going back to fix it is still cheap.
  */
 function SoFar({ items }: { items: { key: string; icon: IconName; value: string }[] }) {
+  const oneLine = useLineLimit(1);
   if (items.length === 0) return null;
   return (
     // `marginTop: auto` inside a `flexGrow: 1` content box: it takes the slack
@@ -891,7 +938,7 @@ function SoFar({ items }: { items: { key: string; icon: IconName; value: string 
       {items.map((item) => (
         <View key={item.key} style={styles.soFarRow}>
           <Icon name={item.icon} size={15} color={colors.textSecondary} />
-          <Text style={styles.soFarValue} numberOfLines={1}>
+          <Text style={styles.soFarValue} numberOfLines={oneLine}>
             {item.value}
           </Text>
           <Icon name="checkmark" size={15} color={colors.successText} />
@@ -927,6 +974,7 @@ function SelectCard({
   active: boolean;
   onPress: () => void;
 }) {
+  const oneLine = useLineLimit(1);
   return (
     <Pressable
       onPress={onPress}
@@ -937,7 +985,7 @@ function SelectCard({
       style={[styles.selectCard, active && styles.selectCardOn]}
     >
       <Text style={styles.lead}>{lead}</Text>
-      <Text style={styles.selectTitle} numberOfLines={1}>
+      <Text style={styles.selectTitle} numberOfLines={oneLine}>
         {title}
       </Text>
       {active && <Icon name="checkmark-circle" size={20} color={colors.ink} />}
@@ -1075,9 +1123,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    gap: spacing.md,
     marginBottom: spacing.xs,
   },
-  showingText: { ...type.footnote },
+  // Shrinks and wraps, so at the accessibility sizes "Change" stays on screen.
+  showingText: { ...type.footnote, flexShrink: 1 },
   showingChange: {
     ...type.label,
     fontFamily: fonts.semibold,

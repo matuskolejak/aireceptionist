@@ -118,7 +118,7 @@ const styles = StyleSheet.create({
   root: { flexDirection: 'row', alignItems: 'center', gap: spacing.xl },
   ring: { width: 128, height: 128, alignItems: 'center', justifyContent: 'center' },
   center: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     alignItems: 'center',
     justifyContent: 'center',
   },

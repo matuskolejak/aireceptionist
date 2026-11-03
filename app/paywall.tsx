@@ -1,4 +1,4 @@
-import { useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
+import { useCanGoBack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -13,9 +13,10 @@ import {
 } from '@/components/paywall';
 import { CycleToggle, PlanCard } from '@/components/plans';
 import { Button, ErrorState, IconButton, Notice, Skeleton, SkeletonCard } from '@/components/ui';
-import { colors, fonts, radius, spacing, type } from '@/constants/theme';
+import { colors, fonts, MAX_TITLE_SCALE, radius, spacing, type } from '@/constants/theme';
 import { usePurchases } from '@/context/PurchaseContext';
 import { api } from '@/lib/api';
+import { formatDay } from '@/lib/format';
 import { isLiveStripe, type PlanKey } from '@/lib/purchases';
 import { usePaywall } from '@/lib/purchases/use-paywall';
 import type { BillingCycle, BillingSnapshot, Catalog } from '@/lib/types';
@@ -29,15 +30,11 @@ const HEADINGS: Record<Reason, string> = {
   plan: 'Plans',
 };
 
-/** "14 Oct 2026". The app's copy is English, so the date is too. */
+/** "14 Oct 2026", the same style as Settings. */
 function shortDate(iso: string): string | null {
   const ms = Date.parse(iso);
   if (Number.isNaN(ms)) return null;
-  return new Date(ms).toLocaleDateString('en-GB', {
-    day: 'numeric',
-    month: 'short',
-    year: 'numeric',
-  });
+  return formatDay(ms);
 }
 
 /** 'Renews 14 Oct 2026' / 'Ends 14 Oct 2026', or null when the store gave no date. */
@@ -63,7 +60,7 @@ function periodLine(billing: BillingSnapshot | null): string | null {
  */
 export default function PaywallScreen() {
   const router = useRouter();
-  const navigation = useNavigation();
+  const canGoBack = useCanGoBack();
   const insets = useSafeAreaInsets();
   const { reason } = useLocalSearchParams<{ reason?: string }>();
   // Compared by value, not `reason in HEADINGS`: a link's `?reason=toString`
@@ -114,9 +111,9 @@ export default function PaywallScreen() {
       return;
     }
     // Opened as the first screen (a link): "back" is the user's home, which
-    // is the tabs once setup is done and the funnel before that.
-    const allowed = navigation.getState()?.routeNames ?? [];
-    router.replace(allowed.includes('(tabs)') ? '/' : '/onboarding');
+    // is the tabs once setup is done and the funnel before that - the tabs'
+    // guard redirects there (app/_layout.tsx).
+    router.replace('/');
   };
 
   const pick = (plan: PlanKey) => {
@@ -177,7 +174,7 @@ export default function PaywallScreen() {
     ) : (
       <ErrorState
         message={catalog.error ?? 'Could not load the plans.'}
-        onRetry={() => void catalog.refresh()}
+        onRetry={catalog.refresh}
       />
     );
   } else {
@@ -319,7 +316,7 @@ export default function PaywallScreen() {
   // iOS presents this as a sheet that already sits below the status bar, but
   // only over another screen: opened first (a link on a cold start) it is a
   // plain full-screen page. Android always slides it up full screen.
-  const sheet = Platform.OS === 'ios' && router.canGoBack();
+  const sheet = Platform.OS === 'ios' && canGoBack;
 
   return (
     <View style={styles.root}>
@@ -329,7 +326,7 @@ export default function PaywallScreen() {
       <ScrollView
         contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + spacing.xxl }]}
       >
-        <Text style={styles.heading} accessibilityRole="header">
+        <Text style={styles.heading} accessibilityRole="header" maxFontSizeMultiplier={MAX_TITLE_SCALE}>
           {heading}
         </Text>
         {body}

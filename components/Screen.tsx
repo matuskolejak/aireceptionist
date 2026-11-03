@@ -10,7 +10,8 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { colors, spacing, type } from '@/constants/theme';
+import { useLineLimit } from '@/components/ui';
+import { colors, MAX_TITLE_SCALE, spacing, type } from '@/constants/theme';
 
 /**
  * The shell every tab sits in: safe-area padding, the page title (the web's
@@ -44,16 +45,18 @@ export function Screen({
   contentStyle?: StyleProp<ViewStyle>;
 }) {
   const insets = useSafeAreaInsets();
+  const twoLines = useLineLimit(2);
 
   const head = header ?? (
     <View style={styles.header}>
       <View style={styles.headerText}>
-        <Text style={type.display} accessibilityRole="header">
+        <Text style={type.display} accessibilityRole="header" maxFontSizeMultiplier={MAX_TITLE_SCALE}>
           {title}
         </Text>
         {subtitle ? (
           // Two lines: "Times in America/New York (this phone)" wraps at larger text sizes.
-          <Text style={styles.subtitle} numberOfLines={2}>
+          // No limit at the accessibility sizes, where two lines still cut the time zone.
+          <Text style={styles.subtitle} numberOfLines={twoLines}>
             {subtitle}
           </Text>
         ) : null}
@@ -71,24 +74,28 @@ export function Screen({
     );
   }
 
+  // The top inset sits on a wrapping View: a UIScrollView does not clip its content
+  // to its own padding, so scrolled rows would run under the status bar.
   return (
-    <ScrollView
-      style={[styles.root, { paddingTop: insets.top }]}
-      contentContainerStyle={[styles.content, contentStyle]}
-      refreshControl={
-        onRefresh ? (
-          <RefreshControl
-            refreshing={Boolean(refreshing)}
-            onRefresh={onRefresh}
-            tintColor={colors.textSecondary}
-            colors={[colors.ink]}
-          />
-        ) : undefined
-      }
-    >
-      {head}
-      {children}
-    </ScrollView>
+    <View style={[styles.root, { paddingTop: insets.top }]}>
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={[styles.content, contentStyle]}
+        refreshControl={
+          onRefresh ? (
+            <RefreshControl
+              refreshing={Boolean(refreshing)}
+              onRefresh={onRefresh}
+              tintColor={colors.textSecondary}
+              colors={[colors.ink]}
+            />
+          ) : undefined
+        }
+      >
+        {head}
+        {children}
+      </ScrollView>
+    </View>
   );
 }
 
@@ -96,6 +103,9 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
     backgroundColor: colors.background,
+  },
+  scroll: {
+    flex: 1,
   },
   content: {
     paddingBottom: spacing.xxl,

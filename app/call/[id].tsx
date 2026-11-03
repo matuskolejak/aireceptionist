@@ -15,6 +15,7 @@ import {
   type LayoutChangeEvent,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
+  type ScrollViewInstance,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -44,14 +45,17 @@ import { colors, control, fonts, MAX_FONT_SCALE, radius, shape, spacing, type } 
 import { api } from '@/lib/api';
 import {
   bucketLabel,
+  callDuration,
   callerLabel,
   callHeadline,
+  dayLabel,
   formatPhone,
   outcomeLabel,
   sentimentLabel,
   sentimentTone,
   statusBucket,
   type StatusBucket,
+  timeLabel,
 } from '@/lib/format';
 import { dial } from '@/lib/links';
 import type { CallActionItem, CallDetail, CallTurn } from '@/lib/types';
@@ -151,18 +155,26 @@ export default function CallDetailScreen() {
   }, [data]);
 
   // -- Translation --
-  // Summary, claims and turns go out as ONE request. While the call is live
+  // Summary, messages, claims and turns go out as ONE request. While the call is live
   // each new turn is new content, so the request waits for the transcript to
   // hold still for a few seconds instead of going out on every poll.
   const source = useMemo(() => {
     const texts: string[] = [];
-    if (!data) return { texts, summaryAt: -1, claimsAt: 0, turnsAt: 0 };
+    if (!data) {
+      return { texts, summaryAt: -1, messageAt: [] as number[], claimsAt: 0, turnsAt: 0 };
+    }
     const summaryAt = data.summary ? texts.push(data.summary) - 1 : -1;
+    // A taken message quotes the caller, so it is in their language too. One
+    // slot per action, in action order; -1 for an action with no message.
+    const messageAt = data.actions.map((a) => {
+      const text = a.type === 'message' ? str(a.payload.message) : '';
+      return text ? texts.push(text) - 1 : -1;
+    });
     const claimsAt = texts.length;
     texts.push(...data.reviewClaims);
     const turnsAt = texts.length;
     texts.push(...data.turns.map((t) => t.text));
-    return { texts, summaryAt, claimsAt, turnsAt };
+    return { texts, summaryAt, messageAt, claimsAt, turnsAt };
   }, [data]);
   const translation = useTranslated(source.texts, {
     enabled: Boolean(data),
@@ -171,7 +183,7 @@ export default function CallDetailScreen() {
   const shown = showOriginal ? source.texts : translation.texts;
 
   // -- Following the transcript while live --
-  const scrollRef = useRef<ScrollView>(null);
+  const scrollRef = useRef<ScrollViewInstance>(null);
   const viewport = useRef({ y: 0, height: 0 });
   const transcriptBottom = useRef(0);
   const turnCount = useRef<number | null>(null);
@@ -237,7 +249,18 @@ export default function CallDetailScreen() {
 
   const bucket = statusBucket(data.status, data.date);
   const withheld = !data.from;
-  const meta = [data.dateLabel, data.durationLabel, manyReceptionists ? data.assistant : '']
+  // The start as the Calls list shows it: the owner's zone and the phone's
+  // 12/24-hour setting. The server's `dateLabel` is always 12-hour; it stays
+  // for a server that sends no zone, or a date that does not parse.
+  const tz = data.timezone;
+  const day = tz ? dayLabel(data.date, tz) : '';
+  const started = tz && day ? `${day} at ${timeLabel(data.date, tz)}` : data.dateLabel;
+  // No length while the call is live or when it never connected: "· 0s" says nothing.
+  const meta = [
+    started,
+    callDuration(data.durationLabel, bucket),
+    manyReceptionists ? data.assistant : '',
+  ]
     .filter(Boolean)
     .join(' · ');
   const mood = sentimentLabel(data.sentiment);
@@ -266,6 +289,7 @@ export default function CallDetailScreen() {
   const summaryToggle = source.summaryAt >= 0 && changed(source.summaryAt, 1) ? toggle : null;
   const claimsToggle = changed(source.claimsAt, data.reviewClaims.length) ? toggle : null;
   const turnsToggle = changed(source.turnsAt, data.turns.length) ? toggle : null;
+  const actionsToggle = source.messageAt.some((at) => at >= 0 && changed(at, 1)) ? toggle : null;
   // Not while live: a live transcript keeps changing, so dimming it until the
   // first debounced reply would grey out even an English call for seconds.
   const dim = translation.translating && !showOriginal && !live ? styles.dim : null;
@@ -361,7 +385,7 @@ export default function CallDetailScreen() {
   ) : null;
 
   const actions = (
-    <SectionCard key="actions" title="What it did">
+    <SectionCard key="actions" title="What it did" action={actionsToggle}>
       {data.actions.length === 0 ? (
         <Text style={styles.placeholder}>No actions taken on this call.</Text>
       ) : (
@@ -369,6 +393,8 @@ export default function CallDetailScreen() {
           <ActionRow
             key={a.id}
             action={a}
+            messageText={source.messageAt[i] >= 0 ? shown[source.messageAt[i]] : undefined}
+            dimmed={dim !== null}
             divided={i > 0}
             onOpenDay={(day) => router.push({ pathname: '/calendar', params: { day } })}
           />
@@ -445,8 +471,9 @@ export default function CallDetailScreen() {
       >
         {blocks}
 
-        {reported ? (
-          <Notice tone="success" icon="checkmark-circle" live style={styles.reportSent}>
+        {/* Sent just now, or on file from before: this phone, another one or the web. */}
+        {reported || data.reported ? (
+          <Notice tone="success" icon="checkmark-circle" live>
             Report sent - thanks
           </Notice>
         ) : (
@@ -712,14 +739,14 @@ function wallClock(iso: string): Date | null {
 function formatWhen(startIso: string, endIso: string): string {
   const start = wallClock(startIso);
   if (!start) return '';
-  const day = start.toLocaleDateString('en', {
+  // en-GB: day first ('Fri 30 Oct'), like dayLabel in the rest of the app.
+  const day = start.toLocaleDateString('en-GB', {
     timeZone: 'UTC',
     weekday: 'short',
     month: 'short',
     day: 'numeric',
   });
-  const time = (d: Date) =>
-    d.toLocaleTimeString('en', { timeZone: 'UTC', hour: '2-digit', minute: '2-digit' });
+  const time = (d: Date) => timeLabel(d.toISOString(), 'UTC');
   const end = wallClock(endIso);
   return `${day} · ${time(start)}${end ? ` - ${time(end)}` : ''}`;
 }
@@ -734,10 +761,16 @@ function bookingDay(startIso: string): string {
 
 function ActionRow({
   action,
+  messageText,
+  dimmed,
   divided,
   onOpenDay,
 }: {
   action: CallActionItem;
+  /** A taken message as shown: translated, or the caller's own words. */
+  messageText?: string;
+  /** Greyed while the translation is on its way, like the other translated cards. */
+  dimmed: boolean;
   divided: boolean;
   onOpenDay: (day: string) => void;
 }) {
@@ -800,7 +833,7 @@ function ActionRow({
   }
 
   if (action.type === 'message') {
-    const message = str(p.message);
+    const message = messageText ?? str(p.message);
     const who = str(p.caller_name);
     const callback = str(p.callback_number);
     // The take_message tool's enum is low | normal | high; "urgent" is kept for
@@ -810,7 +843,9 @@ function ActionRow({
     return (
       <View style={[styles.actionRow, divided && styles.divided]}>
         {head}
-        {message ? <Text style={styles.actionTitle}>&quot;{message}&quot;</Text> : null}
+        {message ? (
+          <Text style={[styles.actionTitle, dimmed && styles.dim]}>&quot;{message}&quot;</Text>
+        ) : null}
         {who || callback || urgent ? (
           <View style={styles.messageMeta}>
             {/* The separator rides on the name, so it is not a stop of its own. */}
@@ -995,7 +1030,13 @@ function ReportSheet({
     if (visible) setState(null);
   }, [visible]);
 
+  // Two taps in one frame both run send() before `busy` re-renders the
+  // button, and each would post a report. The ref stops the second at once.
+  const sending = useRef(false);
+
   async function send() {
+    if (sending.current) return;
+    sending.current = true;
     setBusy(true);
     setState(null);
     try {
@@ -1006,6 +1047,7 @@ function ReportSheet({
     } catch (err) {
       setState({ ok: false, message: (err as Error).message });
     } finally {
+      sending.current = false;
       setBusy(false);
     }
   }
@@ -1158,7 +1200,6 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.md,
   },
   reportText: { ...type.bodySm, fontFamily: fonts.medium, color: colors.textSecondary },
-  reportSent: { alignSelf: 'center' },
 
   skeletonHead: { gap: spacing.sm },
   skeletonBadges: { flexDirection: 'row', gap: 6, marginTop: spacing.xs },

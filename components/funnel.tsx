@@ -1,9 +1,12 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, type ReactNode, type Ref } from 'react';
 import {
   ActivityIndicator,
   Animated,
   Easing,
   Pressable,
+  ScrollView,
+  type ScrollViewInstance,
+  type ScrollViewProps,
   StyleSheet,
   Text,
   View,
@@ -11,8 +14,9 @@ import {
 
 import { Avatar } from '@/components/avatar';
 import { Icon } from '@/components/Icon';
-import { pressed, ripple } from '@/components/ui';
-import { colors, control, fonts, radius, shape, spacing, type } from '@/constants/theme';
+import { useKeyboardUp } from '@/components/form';
+import { pressed, ripple, useLargeText, useLineLimit } from '@/components/ui';
+import { colors, control, fonts, MAX_FONT_SCALE, MAX_TITLE_SCALE, radius, shape, spacing, type } from '@/constants/theme';
 import type { Mood } from '@/lib/personality';
 
 /**
@@ -31,7 +35,9 @@ import type { Mood } from '@/lib/personality';
  * Every step now has the same three zones: the question is pinned at the top and
  * never scrolls, the answer scrolls in the middle, and the actions are docked at
  * the bottom. Only the middle zone changes height, so the funnel never reflows
- * around the caller.
+ * around the caller. At the accessibility text sizes the question scrolls with
+ * the answer instead (`StepScroll`): pinned there, the card alone took about
+ * half the screen.
  */
 
 /**
@@ -90,13 +96,26 @@ export function FunnelHeader({
       </View>
 
       <View style={styles.headerRow}>
-        <Text style={styles.eyebrow} numberOfLines={1}>
+        {/* One line at every size: capped like the other packed labels, and
+            shrunk to fit past that. At the accessibility sizes a chapter that
+            is one long word ("APPOINTMENTS") broke inside the word here. */}
+        <Text
+          style={styles.eyebrow}
+          numberOfLines={1}
+          adjustsFontSizeToFit
+          minimumFontScale={0.6}
+          maxFontSizeMultiplier={MAX_FONT_SCALE}
+        >
           {chapter}
         </Text>
         {/* The count answers "how much longer is this", which is the question a
             funnel is always being asked silently - and it is asked loudest on
             the first screen, so it is never traded away for anything else. */}
-        <Text style={styles.count} accessibilityLabel={`Step ${position} of ${total}`}>
+        <Text
+          style={styles.count}
+          accessibilityLabel={`Step ${position} of ${total}`}
+          maxFontSizeMultiplier={MAX_FONT_SCALE}
+        >
           {position}/{total}
         </Text>
         {onSignIn ? (
@@ -159,6 +178,13 @@ export function Ask({
   talking?: boolean;
   gaze?: number;
 }) {
+  const oneLine = useLineLimit(1);
+  // At the accessibility sizes the full card is about 325 pt tall. With the
+  // keyboard up, the step's fields under it got no room at all (the business
+  // name field was off screen), so while typing there only the question stays.
+  const large = useLargeText();
+  const keyboardUp = useKeyboardUp();
+  const compact = large && keyboardUp;
   const label = name.trim() || 'Your receptionist';
   const enter = useRef(new Animated.Value(0)).current;
 
@@ -169,30 +195,36 @@ export function Ask({
       toValue: 1,
       duration: 240,
       easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
+      // JS-driven on purpose: at the large sizes the avatar row unmounts when
+      // the keyboard comes up, and on Fabric that left a natively driven fade
+      // stuck at opacity 0, so the question vanished. 240 ms on the JS thread
+      // costs nothing.
+      useNativeDriver: false,
     }).start();
   }, [enter, question]);
 
   return (
     <View style={styles.ask}>
-      <View style={styles.askHead}>
-        {/* The name beside it says who this is; the face's own "image" stop
-            would only repeat it. */}
-        <View accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
-          <Avatar
-            mood={mood}
-            size={52}
-            nudge={nudge}
-            celebrate={celebrate}
-            talking={talking}
-            gaze={gaze}
-            label={label}
-          />
+      {compact ? null : (
+        <View style={styles.askHead}>
+          {/* The name beside it says who this is; the face's own "image" stop
+              would only repeat it. */}
+          <View accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+            <Avatar
+              mood={mood}
+              size={52}
+              nudge={nudge}
+              celebrate={celebrate}
+              talking={talking}
+              gaze={gaze}
+              label={label}
+            />
+          </View>
+          <Text style={styles.name} numberOfLines={oneLine}>
+            {label}
+          </Text>
         </View>
-        <Text style={styles.name} numberOfLines={1}>
-          {label}
-        </Text>
-      </View>
+      )}
 
       <Animated.View
         style={[
@@ -203,12 +235,38 @@ export function Ask({
           },
         ]}
       >
-        <Text style={styles.question} accessibilityRole="header">
+        <Text style={styles.question} accessibilityRole="header" maxFontSizeMultiplier={MAX_TITLE_SCALE}>
           {question}
         </Text>
-        {sub ? <Text style={styles.sub}>{sub}</Text> : null}
+        {sub && !compact ? <Text style={styles.sub}>{sub}</Text> : null}
       </Animated.View>
     </View>
+  );
+}
+
+/**
+ * A step's middle zone: the answer, scrolling, with the question pinned above
+ * it. At the accessibility text sizes the question card is the first thing in
+ * the scroll instead. Pinned there it took about half the screen: the answer
+ * on the appointments step got about 160 pt, the hint under the account
+ * step's button ran into the home indicator, and a shorter phone would leave
+ * the answer no room at all.
+ */
+export function StepScroll({
+  ask,
+  scrollRef,
+  children,
+  ...scroll
+}: ScrollViewProps & { ask: ReactNode; scrollRef?: Ref<ScrollViewInstance> }) {
+  const large = useLargeText();
+  return (
+    <>
+      {large ? null : ask}
+      <ScrollView ref={scrollRef} {...scroll}>
+        {large ? <View style={styles.askScrolled}>{ask}</View> : null}
+        {children}
+      </ScrollView>
+    </>
   );
 }
 
@@ -248,6 +306,11 @@ export interface Action {
   onPress: () => void;
   busy?: boolean;
   disabled?: boolean;
+  /**
+   * Runs when `primary` is pressed while disabled, so the step can say why it
+   * is waiting. Without it a disabled button ignores presses.
+   */
+  onBlockedPress?: () => void;
   /**
    * Quiet lead-in shown before `label`, for a secondary action whose question
    * and answer are one sentence: "No number to transfer to? **Skip this**". The
@@ -296,8 +359,8 @@ export function Actions({
           </Pressable>
         )}
         <Pressable
-          onPress={primary.onPress}
-          disabled={primary.disabled || primary.busy}
+          onPress={primary.disabled ? primary.onBlockedPress : primary.onPress}
+          disabled={primary.busy || (primary.disabled && !primary.onBlockedPress)}
           accessibilityRole="button"
           // Explicit, so iOS does not build the label from the children and
           // read the arrow glyph after the words.
@@ -306,7 +369,7 @@ export function Actions({
             disabled: Boolean(primary.disabled),
             busy: Boolean(primary.busy),
           }}
-          android_ripple={ripple}
+          android_ripple={waiting ? undefined : ripple}
           style={({ pressed: down }) => [
             styles.next,
             waiting && styles.nextWaiting,
@@ -400,6 +463,9 @@ const styles = StyleSheet.create({
 
   ask: { paddingHorizontal: spacing.lg, paddingTop: spacing.sm },
   askHead: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  // In the scroll the card keeps its pinned size: its own padding replaces the
+  // scroll content's, and with the content's gap the space under it stays lg.
+  askScrolled: { marginTop: -spacing.lg, marginHorizontal: -spacing.lg, marginBottom: spacing.sm },
   name: { ...type.label, color: colors.textSecondary },
   bubble: {
     marginTop: spacing.sm,

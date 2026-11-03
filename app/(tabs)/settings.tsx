@@ -17,12 +17,13 @@ import {
   SectionCard,
   SkeletonCard,
   StaleNotice,
+  useLineLimit,
 } from '@/components/ui';
-import { colors, fonts, spacing, type } from '@/constants/theme';
-import { useAuth } from '@/context/AuthContext';
+import { colors, fonts, MAX_TITLE_SCALE, spacing, type } from '@/constants/theme';
+import { initialsFrom, useAuth } from '@/context/AuthContext';
 import { usePurchases } from '@/context/PurchaseContext';
 import { api } from '@/lib/api';
-import { formatPhone } from '@/lib/format';
+import { formatDay, formatPhone } from '@/lib/format';
 import { dial, openInApp, PRIVACY_URL, SUPPORT_URL, TERMS_URL } from '@/lib/links';
 import { isLiveStripe } from '@/lib/purchases';
 import type { Account, BillingSnapshot } from '@/lib/types';
@@ -38,8 +39,9 @@ import { useQuery } from '@/lib/use-query';
  * account billed on the web is told so in plain text and nothing more.
  */
 export default function SettingsScreen() {
+  const oneLine = useLineLimit(1);
   const router = useRouter();
-  const { email, name, initials, signOut } = useAuth();
+  const { email, name, signOut } = useAuth();
   const { data, error, loading, refreshing, refresh } = useQuery(() => api.account(), []);
   const purchases = usePurchases();
   const { refreshBilling } = purchases;
@@ -110,13 +112,19 @@ export default function SettingsScreen() {
             accessibilityLabel={`${data.profile.fullName || name}, ${email}`}
           >
             <View style={styles.avatar}>
-              <Text style={styles.avatarText}>{initials}</Text>
+              {/* The circle is a fixed 44 pt, so its initials stop growing
+                  where the standard text sizes end: at the accessibility sizes
+                  they spilled out of it. The name beside it is the readable
+                  text. */}
+              <Text style={styles.avatarText} maxFontSizeMultiplier={MAX_TITLE_SCALE}>
+                {initialsFrom(data.profile.fullName || name, email)}
+              </Text>
             </View>
             <View style={styles.flex}>
-              <Text style={styles.name} numberOfLines={1}>
+              <Text style={styles.name} numberOfLines={oneLine}>
                 {data.profile.fullName || name}
               </Text>
-              <Text style={styles.email} numberOfLines={1}>
+              <Text style={styles.email} numberOfLines={oneLine}>
                 {email}
               </Text>
             </View>
@@ -258,9 +266,7 @@ const inStore = (provider: 'apple' | 'google') => (provider === 'apple' ? 'in th
 function formatDate(iso: string | null): string {
   const ms = Date.parse(iso ?? '');
   if (!Number.isFinite(ms)) return '';
-  return new Intl.DateTimeFormat('en', { day: 'numeric', month: 'short', year: 'numeric' }).format(
-    new Date(ms),
-  );
+  return formatDay(ms);
 }
 
 function statusLine(billing: BillingSnapshot, kind: BilledBy): { text: string; warn: boolean } | null {

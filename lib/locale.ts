@@ -29,6 +29,28 @@ export function deviceTimeZone(): string {
 }
 
 /**
+ * Whether the phone shows a 24-hour clock. The copy is English, but '2:05 PM'
+ * on a phone set to 14:05 reads wrong, so times follow this setting.
+ *
+ * The web build's getCalendars() leaves it null (a plain resolvedOptions()
+ * has no hourCycle), so ask Intl with an hour in the format instead.
+ */
+export function deviceUses24HourClock(): boolean {
+  try {
+    const flag = getCalendars()[0]?.uses24hourClock;
+    if (typeof flag === 'boolean') return flag;
+  } catch {
+    // Fall through to Intl.
+  }
+  try {
+    const cycle = new Intl.DateTimeFormat(undefined, { hour: 'numeric' }).resolvedOptions().hourCycle;
+    return cycle === 'h23' || cycle === 'h24';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Which number country to preselect for a given UI language. Mirrors
  * LOCALE_COUNTRY in the web repo's lib/number-pricing.ts, so the same person
  * gets the same default on both surfaces.

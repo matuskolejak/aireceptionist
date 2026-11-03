@@ -86,6 +86,11 @@ answers 500 and no alert is ever sent.
 - Google Play console entry with package `com.aireceptionistnow.app`.
 - Screenshots, description, support URL, privacy policy URL. None of these live
   in this repo.
+- Sign in with Apple needs four server env vars on the web project:
+  `APPLE_SIWA_TEAM_ID`, `APPLE_SIWA_KEY_ID`, `APPLE_SIWA_PRIVATE_KEY` and
+  `APPLE_SIWA_CLIENT_ID`. Without them, account deletion cannot revoke the
+  Apple grant (web `lib/mobile/apple-signin.ts`), which App Review checks
+  (guideline 5.1.1(v)).
 
 ### 4. App privacy answers
 
@@ -106,6 +111,26 @@ Answer them from what the app actually does, which is now narrower than it was:
   Face ID (see below), so there is nothing else to justify.
 - `ITSAppUsesNonExemptEncryption: false` is already set and is correct: the app
   uses only standard HTTPS through the OS stack and ships no custom crypto.
+
+### 5. Store products and billing
+
+The paywall sells nothing until the stores and RevenueCat know the products.
+Follow the web repo's `BILLING.md`, section "Store subscriptions (App Store /
+Google Play)" (`../aireceptionistnow/BILLING.md`). In short:
+
+- App Store Connect: one subscription group with the four products
+  `com.aireceptionistnow.app.{solo,team}.{monthly,annual}`. Set App Store
+  Server Notifications (version 2) to
+  `https://aireceptionistnow.com/api/apple/notifications`, for both
+  Production and Sandbox.
+- Play Console: subscriptions `solo` and `team`, each with the base plans
+  `monthly` and `annual`.
+- RevenueCat: a project with the Play app, entitlements `solo` and `team`,
+  and a webhook to `https://aireceptionistnow.com/api/revenuecat/webhook`
+  with the Authorization header value from the web env `REVENUECAT_WEBHOOK_AUTH`.
+- EAS env for Android builds: `EXPO_PUBLIC_REVENUECAT_ANDROID_KEY` (the public
+  `goog_` key) and `GOOGLE_SERVICES_JSON` (a `file` variable). Preflight
+  checks that both exist, but not the store-side setup above.
 
 ---
 
@@ -143,6 +168,8 @@ Answer them from what the app actually does, which is now narrower than it was:
 The app now requests **no iOS usage-string permission at all**, and on Android
 only `INTERNET`, `VIBRATE`, `MODIFY_AUDIO_SETTINGS` and (merged from
 expo-notifications) `POST_NOTIFICATIONS`.
+TODO: check after the first prebuild. Libraries may merge more, for example
+`com.android.vending.BILLING` from RevenueCat.
 
 `SYSTEM_ALERT_WINDOW` (the React Native template's dev-menu overlay) is in
 `android.blockedPermissions` too, so "Display over other apps" stays off the
@@ -188,28 +215,14 @@ then add `"channel": "production"` / `"channel": "preview"` to the matching
 
 ---
 
-## Not a repository
-
-This directory has no `.git`. That is worth fixing before the first build, for
-two reasons: EAS uploads the project directory and uses `.gitignore` to decide
-what to skip, so without a repo you risk uploading `node_modules` and `dist`;
-and there is currently no way to review, revert, or bisect any change here.
-
-```bash
-git init && git add -A && git commit -m "Initial commit"
-```
-
-`.gitignore` is already correct - `.env`, `node_modules/`, `dist/`, `ios/`,
-`android/` and every key type are covered. Nothing secret is committed.
-
----
-
 ## Server-side follow-ups
 
 None of these block a release. All of them are in the `aireceptionistnow` repo
 and were found by cross-checking the client against the live routes.
 
-1. **`/api/mobile/calendar/bookings/[id]` is not idempotent on cancel.** A
+1. **Done.** The route now answers 409 "This booking is already cancelled."
+   for a second cancel (web `app/api/mobile/calendar/bookings/[id]/route.ts`).
+   Old note: **`/api/mobile/calendar/bookings/[id]` is not idempotent on cancel.** A
    second `action: 'cancel'` POST for the same booking re-runs
    `cancelCalendarEvent` and schedules `notifyCancelledCustomer` again, which
    places a second cancellation call to a real customer. The app can no longer
@@ -223,7 +236,8 @@ and were found by cross-checking the client against the live routes.
    `owner_id` is unchanged.
 3. **`/api/mobile/push` has no `GET`**, so the Alerts switch cannot read back
    this install's real server state - including a mute set from another install.
-4. **The calendar OAuth flow never redirects back to `aireceptionistnow://`**,
+4. **Done.** `/api/mobile/web-link` now bounces to `/mobile/done?return=...`.
+   Old note: **The calendar OAuth flow never redirects back to `aireceptionistnow://`**,
    so the auth browser has to be dismissed by hand. The client already reads an
    `error` param off the returned URL, so it starts working the moment a bounce
    page exists.

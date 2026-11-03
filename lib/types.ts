@@ -183,6 +183,11 @@ export interface CallDetail {
   sid: string;
   date: string;
   dateLabel: string;
+  /**
+   * The owner's IANA zone `dateLabel` is in. A server older than the field
+   * leaves it out; the header then shows `dateLabel` as it is.
+   */
+  timezone?: string;
   status: string;
   statusLabel: string;
   direction: string;
@@ -201,6 +206,11 @@ export interface CallDetail {
   reviewClaims: string[];
   turns: CallTurn[];
   actions: CallActionItem[];
+  /**
+   * A report is on file for this call, sent from the app or the web. A server
+   * older than the field leaves it out; the screen then offers the report again.
+   */
+  reported?: boolean;
 }
 
 export interface AssistantSummary {
@@ -301,7 +311,7 @@ export interface AssistantDetail {
     disclosure: 'if_asked' | 'upfront';
   };
   customTools: AssistantCustomTool[];
-  /** `level` is 'none' | 'read' | 'book' ... - legacy 'busy' arrives as 'read'. */
+  /** `level` is 'none' | 'read' | 'write' - legacy 'busy' arrives as 'read'. */
   calendars: { id: string; provider: string; name: string; level: string }[];
   setup: { items: { key: SetupKey; done: boolean }[]; percent: number };
   numberCountries: NumberCountryOption[];

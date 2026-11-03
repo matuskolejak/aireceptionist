@@ -160,6 +160,13 @@ export const control = { lg: 52, md: 44, sm: 40 } as const;
 export const MAX_FONT_SCALE = 1.6;
 
 /**
+ * Cap for big titles (`type.display`): 24 x 1.4 is about the iOS 34pt large title. Without
+ * it a long word ("Appointments") gets wider than the line and breaks mid-word. Above the
+ * largest standard text size (1.35), so only the accessibility sizes are capped.
+ */
+export const MAX_TITLE_SCALE = 1.4;
+
+/**
  * Content cards are flat, like the web's `.glass` ("no drop shadow"); a shadow
  * is only for something that floats over the page - a popover, a callout.
  */

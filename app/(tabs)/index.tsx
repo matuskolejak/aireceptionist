@@ -32,12 +32,15 @@ import {
   StaleNotice,
   StatTile,
   TextLink,
+  useLargeText,
+  useLineLimit,
   type BadgeTone,
   type SegmentOption,
 } from '@/components/ui';
 import { colors, fonts, radius, shape, spacing, type } from '@/constants/theme';
 import { api } from '@/lib/api';
 import {
+  callDuration,
   callerLabel,
   callHeadline,
   dayKey,
@@ -75,6 +78,8 @@ const STATUS_LINE: Record<AvatarStatus, string> = {
 };
 
 export default function HomeScreen() {
+  const largeText = useLargeText();
+  const twoLines = useLineLimit(2);
   const router = useRouter();
   // Mirrors `/dashboard?range=month`. The month rollup is a separate, heavier
   // query, so - like the web page - it is only requested once you ask for it.
@@ -94,8 +99,8 @@ export default function HomeScreen() {
 
   const openActivity = useCallback(() => router.push('/notifications'), [router]);
 
-  // `tel:` has no handler on an iPad without a dialer and the app ships with
-  // `supportsTablet`, so `openURL` genuinely rejects on a supported target.
+  // `tel:` has no handler on an iPad without a dialer, and iPhone apps also run
+  // on iPad in compatibility mode, so `openURL` genuinely rejects there.
   // Dropping that promise leaves a button that does nothing and an unhandled
   // rejection behind it.
   const dial = useCallback((e164: string) => {
@@ -294,11 +299,11 @@ export default function HomeScreen() {
         <Card>
           <View style={styles.statusRow}>
             <Dot color={offline ? colors.error : enabled ? colors.success : colors.warning} size={10} />
-            <Text style={styles.statusText} numberOfLines={2}>
+            <Text style={styles.statusText} numberOfLines={twoLines}>
               {bandText}
             </Text>
           </View>
-          <View style={styles.statusActions}>
+          <View style={[styles.statusActions, largeText && styles.statusActionsStacked]}>
             {/* Pausing "the receptionist" is only unambiguous with exactly one. */}
             {data.assistant && data.assistantCount === 1 && (
               <Button
@@ -313,7 +318,7 @@ export default function HomeScreen() {
                     ? `Stops ${data.assistant.name} answering calls`
                     : `${data.assistant.name} starts answering calls again`
                 }
-                style={styles.flexBtn}
+                style={largeText ? undefined : styles.flexBtn}
               />
             )}
             {Boolean(data.number) && (
@@ -323,7 +328,7 @@ export default function HomeScreen() {
                 size="pill"
                 variant="secondary"
                 onPress={() => dial(data.number)}
-                style={styles.flexBtn}
+                style={largeText ? undefined : styles.flexBtn}
               />
             )}
           </View>
@@ -466,7 +471,7 @@ export default function HomeScreen() {
                 key={c.id}
                 headline={callHeadline({ outcome: c.outcome, status: c.status, date: c.startedAt })}
                 caller={`${c.flag ? `${c.flag} ` : ''}${callerLabel(c.number)}`}
-                meta={c.duration}
+                meta={callDuration(c.duration, statusBucket(c.status, c.startedAt))}
                 when={relTime(c.agoMinutes)}
                 bucket={statusBucket(c.status, c.startedAt)}
                 outcome={c.outcome}
@@ -580,6 +585,7 @@ function BrandHeader({
   unread: boolean;
   onBell: () => void;
 }) {
+  const oneLine = useLineLimit(1);
   const line = STATUS_LINE[status];
   return (
     <View style={styles.brand}>
@@ -590,10 +596,10 @@ function BrandHeader({
         accessibilityRole="header"
         accessibilityLabel={`${name}, ${line}`}
       >
-        <Text style={styles.brandName} numberOfLines={1}>
+        <Text style={styles.brandName} numberOfLines={oneLine}>
           {name}
         </Text>
-        <Text style={styles.brandStatus} numberOfLines={1}>
+        <Text style={styles.brandStatus} numberOfLines={oneLine}>
           {line}
         </Text>
       </View>
@@ -653,6 +659,7 @@ function UpcomingRow({
   timezone: string;
   divided: boolean;
 }) {
+  const oneLine = useLineLimit(1);
   const router = useRouter();
   const name = b.attendeeName || b.title || 'Unknown caller';
   const when = formatWhen(b.startTime, timezone);
@@ -671,10 +678,10 @@ function UpcomingRow({
       style={({ pressed: down }) => [styles.activityRow, divided && styles.divided, down && pressed]}
     >
       <View style={styles.flex}>
-        <Text style={styles.rowTitle} numberOfLines={1}>
+        <Text style={styles.rowTitle} numberOfLines={oneLine}>
           {name}
         </Text>
-        <Text style={styles.rowMeta} numberOfLines={1}>
+        <Text style={styles.rowMeta} numberOfLines={oneLine}>
           {meta}
         </Text>
       </View>
@@ -755,6 +762,7 @@ function PushPrimer({
   onAccept: () => void;
   onDismiss: () => void;
 }) {
+  const largeText = useLargeText();
   return (
     <Card>
       <View style={styles.primerHead}>
@@ -771,13 +779,13 @@ function PushPrimer({
           </Text>
         </View>
       </View>
-      <View style={styles.statusActions}>
+      <View style={[styles.statusActions, largeText && styles.statusActionsStacked]}>
         <Button
           label="Turn on alerts"
           size="pill"
           onPress={onAccept}
           busy={busy}
-          style={styles.flexBtn}
+          style={largeText ? undefined : styles.flexBtn}
         />
         <Button
           label="Not now"
@@ -785,7 +793,7 @@ function PushPrimer({
           variant="secondary"
           onPress={onDismiss}
           disabled={busy}
-          style={styles.flexBtn}
+          style={largeText ? undefined : styles.flexBtn}
         />
       </View>
     </Card>
@@ -931,6 +939,7 @@ function Issues({
   minutesUsed: number;
   minutesIncluded: number;
 }) {
+  const twoLines = useLineLimit(2);
   const router = useRouter();
 
   // With one receptionist the fix is on its own screen; the list would only
@@ -997,7 +1006,7 @@ function Issues({
             style={({ pressed: down }) => [styles.issueRow, down && pressed]}
           >
             <Dot color={issue.level === 'red' ? colors.error : colors.warning} />
-            <Text style={styles.issueText} numberOfLines={2}>
+            <Text style={styles.issueText} numberOfLines={twoLines}>
               {issue.text}
             </Text>
             <Text style={styles.issueAction}>{issue.action}</Text>
@@ -1085,6 +1094,8 @@ const styles = StyleSheet.create({
     gap: spacing.sm,
     marginTop: spacing.md,
   },
+  /** At the accessibility text sizes two pills side by side get too narrow for their labels. */
+  statusActionsStacked: { flexDirection: 'column' },
 
   tiles: {
     flexDirection: 'row',

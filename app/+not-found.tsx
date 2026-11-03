@@ -1,4 +1,4 @@
-import { Stack, useNavigation, useRouter } from 'expo-router';
+import { Stack, useRouter } from 'expo-router';
 import { StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -11,18 +11,16 @@ import { colors } from '@/constants/theme';
  * development "Unmatched route" page.
  *
  * "Home" depends on where the user is: the tabs once setup is done, the setup
- * funnel before that (and for a guest). The root Stack only lists the screens
- * the user may open right now (app/_layout.tsx), so its route names say which.
+ * funnel before that (and for a guest). Over either one, this steps back to
+ * it; a replace would stack a second copy on top. Opened cold, with nothing
+ * below, "/" is the tabs, and their guard redirects anyone not done yet to the
+ * funnel (app/_layout.tsx).
  */
 export default function NotFoundScreen() {
   const router = useRouter();
-  const navigation = useNavigation();
   const insets = useSafeAreaInsets();
 
-  const goHome = () => {
-    const allowed = navigation.getState()?.routeNames ?? [];
-    router.replace(allowed.includes('(tabs)') ? '/' : '/onboarding');
-  };
+  const goHome = () => (router.canDismiss() ? router.dismissAll() : router.replace('/'));
 
   return (
     <View style={[styles.root, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>

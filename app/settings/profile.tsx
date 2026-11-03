@@ -1,7 +1,6 @@
-import { useHeaderHeight } from '@react-navigation/elements';
-import { usePreventRemove } from '@react-navigation/native';
 import * as Haptics from 'expo-haptics';
-import { useNavigation, useRouter } from 'expo-router';
+import { usePreventRemove, useRouter } from 'expo-router';
+import { useHeaderHeight } from 'expo-router/react-navigation';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, View } from 'react-native';
 
@@ -10,6 +9,8 @@ import { ErrorState, SkeletonForm, StaleNotice } from '@/components/ui';
 import { colors, spacing } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
 import { api } from '@/lib/api';
+import { HOUR_CYCLE } from '@/lib/format';
+import { dialable, isValidPhone } from '@/lib/phone';
 import { deviceTimeZone } from '@/lib/locale';
 import { useQuery } from '@/lib/use-query';
 
@@ -21,7 +22,6 @@ import { useQuery } from '@/lib/use-query';
  */
 export default function ProfileScreen() {
   const router = useRouter();
-  const navigation = useNavigation();
   const headerHeight = useHeaderHeight();
   const { email } = useAuth();
   const { data, error, loading, refresh } = useQuery(() => api.settings(), []);
@@ -115,14 +115,22 @@ export default function ProfileScreen() {
   // exactly as the editor's sheets would - so this asks the same question they
   // do. A save that is on its way out sets `leaving` and passes straight through.
   const leaving = useRef(false);
-  usePreventRemove(dirty && !busy, ({ data: removal }) => {
+  // Expo Router blocks the same action again while prevention is on, so dispatching
+  // it would just ask again. `repeat` lifts the prevention and then dispatches;
+  // `allowLeave` turns `preventRemove` off with it, as the hook expects.
+  const [allowLeave, setAllowLeave] = useState(false);
+  usePreventRemove(dirty && !busy && !allowLeave, ({ repeat }) => {
+    const leave = () => {
+      setAllowLeave(true);
+      repeat();
+    };
     if (leaving.current) {
-      navigation.dispatch(removal.action);
+      leave();
       return;
     }
     Alert.alert('Discard changes?', 'Your edits to your profile have not been saved.', [
       { text: 'Keep editing', style: 'cancel' },
-      { text: 'Discard', style: 'destructive', onPress: () => navigation.dispatch(removal.action) },
+      { text: 'Discard', style: 'destructive', onPress: leave },
     ]);
   });
 
@@ -141,9 +149,13 @@ export default function ProfileScreen() {
   // answering for a business with no name.
   const nameMissing = !fullName.trim();
   const companyMissing = !company.trim();
+  // Same rule as the server: only a changed phone is checked, so a number saved
+  // earlier in another form does not block the rest. Blank keeps alerts off.
+  const phoneInvalid =
+    phone.trim() !== '' && dialable(phone) !== dialable(data.profile.phone) && !isValidPhone(phone);
 
   async function save() {
-    if (nameMissing || companyMissing) return;
+    if (nameMissing || companyMissing || phoneInvalid) return;
     setBusy(true);
     setState(null);
     try {
@@ -224,6 +236,7 @@ export default function ProfileScreen() {
           autoCapitalize="none"
           autoComplete="tel"
           textContentType="telephoneNumber"
+          error={phoneInvalid ? 'Enter the number with the country code, like +421 905 123 456.' : undefined}
           hint="Used for text alerts when your receptionist takes a message."
         />
         <SelectRow
@@ -251,7 +264,7 @@ export default function ProfileScreen() {
       <SaveBar
         onSave={save}
         busy={busy}
-        dirty={dirty && !nameMissing && !companyMissing}
+        dirty={dirty && !nameMissing && !companyMissing && !phoneInvalid}
         state={state}
       />
     </KeyboardAvoidingView>
@@ -270,24 +283,43 @@ function zoneName(zone: string): string {
 function zoneLabel(zone: string, now: Date): string {
   const name = zoneName(zone);
   try {
-    // One formatter gives both the local time and the offset.
+    // The offset comes from the zone's wall clock, not from a 'shortOffset'
+    // name: Hermes on iOS splits that name into broken parts ('GMT' and a
+    // stray '+', no digits), while the numeric parts are right everywhere.
     const parts = new Intl.DateTimeFormat('en', {
       timeZone: zone,
+      year: 'numeric',
+      month: 'numeric',
+      day: 'numeric',
       hour: 'numeric',
       minute: '2-digit',
-      timeZoneName: 'shortOffset',
+      hourCycle: 'h23',
     }).formatToParts(now);
-    const offset = parts.find((p) => p.type === 'timeZoneName')?.value ?? '';
-    const time = parts
-      .filter((p) => p.type !== 'timeZoneName')
-      .map((p) => p.value)
-      .join('')
-      .trim();
-    return `${name} (${offset ? `${offset}, ` : ''}${time})`;
+    const n = (type: Intl.DateTimeFormatPartTypes) =>
+      Number(parts.find((p) => p.type === type)?.value ?? 0);
+    // Some engines print midnight as hour 24.
+    const hour = n('hour') % 24;
+    const minute = n('minute');
+    const wall = Date.UTC(n('year'), n('month') - 1, n('day'), hour, minute);
+    const offset = Math.round((wall - Math.floor(now.getTime() / 60_000) * 60_000) / 60_000);
+    const mm = String(minute).padStart(2, '0');
+    const time =
+      HOUR_CYCLE === 'h23'
+        ? `${String(hour).padStart(2, '0')}:${mm}`
+        : `${hour % 12 || 12}:${mm} ${hour < 12 ? 'AM' : 'PM'}`;
+    return `${name} (${gmtOffset(offset)}, ${time})`;
   } catch {
-    // An engine without this zone (or without shortOffset) still gets the name.
+    // An engine without this zone still gets the name.
     return name;
   }
+}
+
+/** Minutes east of UTC -> 'GMT', 'GMT+1', 'GMT-4', 'GMT+5:30' (the 'shortOffset' style). */
+function gmtOffset(minutes: number): string {
+  if (minutes === 0) return 'GMT';
+  const abs = Math.abs(minutes);
+  const m = abs % 60;
+  return `GMT${minutes > 0 ? '+' : '-'}${Math.floor(abs / 60)}${m ? `:${String(m).padStart(2, '0')}` : ''}`;
 }
 
 const styles = StyleSheet.create({

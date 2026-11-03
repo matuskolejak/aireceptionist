@@ -67,6 +67,9 @@ export default function TabLayout() {
               <Text
                 style={[styles.label, { color }]}
                 numberOfLines={1}
+                // Shrink a long label ("Appointments") a little instead of cutting it.
+                adjustsFontSizeToFit
+                minimumFontScale={0.8}
                 allowFontScaling
                 maxFontSizeMultiplier={MAX_LABEL_SCALE}
               >
@@ -79,7 +82,7 @@ export default function TabLayout() {
             tabBarAccessibilityLabel:
               Platform.OS === 'ios' ? `${tab.title}, tab, ${i + 1} of ${TABS.length}` : undefined,
             tabBarIcon: ({ color, focused }) => (
-              <Icon name={focused ? tab.iconFocused : tab.icon} size={22} color={color} />
+              <Icon name={focused ? tab.iconFocused : tab.icon} size={22} color={typeof color === 'string' ? color : undefined} />
             ),
           }}
         />

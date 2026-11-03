@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { api } from './api';
+import { noteTitle } from './format';
 import {
   EMPTY_DRAFT,
   flushDraft,
@@ -80,19 +81,16 @@ const FLUSH_ERROR = 'Some of what you set up before signing in has not been save
 
 /** A guest's typed notes, shaped like the server's source rows. */
 function draftSources(draft: OnboardingDraft) {
-  return draft.notes.map((text, i) => {
-    const firstLine = text.split('\n').map((l) => l.trim()).find(Boolean) ?? '';
-    return {
-      // Positional, because a guest note has no server id yet. Stable for as
-      // long as the list is, which is all `remove-source` needs.
-      id: `draft-${i}`,
-      kind: 'text',
-      title: firstLine ? firstLine.slice(0, 50) : 'What I told it',
-      // No summary: summarizing is an AI call on the server, and a guest note
-      // has not been near it yet. The row renders title-only until it flushes.
-      summary: '',
-    };
-  });
+  return draft.notes.map((text, i) => ({
+    // Positional, because a guest note has no server id yet. Stable for as
+    // long as the list is, which is all `remove-source` needs.
+    id: `draft-${i}`,
+    kind: 'text',
+    title: noteTitle(text, 'What I told it'),
+    // No summary: summarizing is an AI call on the server, and a guest note
+    // has not been near it yet. The row renders title-only until it flushes.
+    summary: '',
+  }));
 }
 
 /** The server's shape, built from a local draft plus the public catalogue. */
@@ -217,6 +215,13 @@ export function useFunnel(signedIn: boolean, email: string): Funnel {
             setFlushing(false);
           }
         } else {
+          // Nothing to replay. Step 1's answers in progress are read back only
+          // by an account still on step 1; anywhere else they would wait here
+          // until a sign-out and greet the next guest on this phone. Same
+          // cleanup as the end of a replay: only the plan choice stays.
+          if (first.done || first.step > 1) {
+            await updateDraft((d) => ({ ...EMPTY_DRAFT, plan: d.plan }));
+          }
           flushed.current = true;
         }
       }

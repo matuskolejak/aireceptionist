@@ -21,7 +21,14 @@ import {
 } from '@/components/ui';
 import { colors, fonts, shape, spacing, type } from '@/constants/theme';
 import { api } from '@/lib/api';
-import { callerLabel, callHeadline, formatDuration, relTimeOf, statusBucket } from '@/lib/format';
+import {
+  callDuration,
+  callerLabel,
+  callHeadline,
+  formatDuration,
+  relTimeOf,
+  statusBucket,
+} from '@/lib/format';
 import { useQuery } from '@/lib/use-query';
 
 /**
@@ -37,7 +44,7 @@ const LAST_SEEN_KEY = 'activity.lastSeenAt';
  * Rows are built from the raw fields (`from`, `outcome`, `status`,
  * `durationSec`) with the same formatters as Home and Calls, not from the web
  * bell's English `title`/`subtitle`, which carry a raw number and database
- * words ('No-answer · 0m 00s'). They are drawn by the same `CallRow` as Home
+ * words ('No-answer · 0s'). They are drawn by the same `CallRow` as Home
  * and the Calls tab, so a call looks like itself on all three.
  */
 export default function NotificationsScreen() {
@@ -133,7 +140,7 @@ export default function NotificationsScreen() {
                 key={item.id}
                 headline={callHeadline({ outcome: item.outcome, status: item.status, date: item.at })}
                 caller={callerLabel(item.from)}
-                meta={formatDuration(item.durationSec)}
+                meta={callDuration(formatDuration(item.durationSec), statusBucket(item.status, item.at))}
                 when={relTimeOf(item.at)}
                 bucket={statusBucket(item.status, item.at)}
                 outcome={item.outcome}

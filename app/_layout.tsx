@@ -5,15 +5,15 @@ import {
   Inter_600SemiBold,
   useFonts,
 } from '@expo-google-fonts/inter';
-import { DefaultTheme, ThemeProvider } from '@react-navigation/native';
 import * as Notifications from 'expo-notifications';
-import { Stack, useRouter } from 'expo-router';
+import { DefaultTheme, Stack, ThemeProvider, router, usePathname, useRouter } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Image, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, Image, Platform, Pressable, StyleSheet, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
+import { Icon } from '@/components/Icon';
 import { AuthProvider, useAuth } from '@/context/AuthContext';
 import { PurchaseProvider } from '@/context/PurchaseContext';
 import { SetupGateContext } from '@/context/SetupGate';
@@ -41,6 +41,26 @@ const AppTheme = {
 };
 
 /**
+ * Back for every native header on iOS. react-native-screens 4.16 disables the
+ * native back button on iOS 26+ while a pop runs (RNSScreenStack.mm
+ * shouldPopItem) and finds it again by private UIKit class names. Under our
+ * headerless tabs root it misses, so Back stays dead after the first pop. iOS
+ * still puts this custom item in the same glass circle. Retest Back on two
+ * pushed screens in a row before removing it on a react-native-screens upgrade.
+ */
+function HeaderBack() {
+  return (
+    <Pressable
+      onPress={() => router.back()}
+      hitSlop={12}
+      accessibilityRole="button"
+      accessibilityLabel="Back">
+      <Icon name="chevron-back" size={24} color={colors.ink} />
+    </Pressable>
+  );
+}
+
+/**
  * Every native header in the app: the web PageHeader's Inter 600 on the page
  * colour, no hairline under it, and a bare chevron for back (the previous
  * screen's title beside it read as a second, competing title).
@@ -52,6 +72,11 @@ const screenOptions = {
   headerBackButtonDisplayMode: 'minimal',
   headerStyle: { backgroundColor: colors.background },
   headerTintColor: colors.ink,
+  // Android keeps its native up button; only screens that can go back get one.
+  headerLeft:
+    Platform.OS === 'ios'
+      ? ({ canGoBack }: { canGoBack?: boolean }) => (canGoBack ? <HeaderBack /> : null)
+      : undefined,
 } as const;
 
 /** The native splash's artwork and size (app.json, expo-splash-screen plugin). */
@@ -154,7 +179,7 @@ function RootNav() {
   // Tapping a notification.
   //
   // Two paths, and missing either one is a bug you only see on a real device:
-  // `getLastNotificationResponseAsync` covers a COLD start (the app was killed,
+  // `getLastNotificationResponse` covers a COLD start (the app was killed,
   // the tap launched it), the listener covers a warm one. Handled here rather
   // than per-screen because the router is only mounted at this level.
   const handled = useRef<string | null>(null);
@@ -173,7 +198,8 @@ function RootNav() {
       if (payload) router.push(payload.path as never);
     };
 
-    void Notifications.getLastNotificationResponseAsync().then(open);
+    // Not on web: there expo-notifications 58 throws instead of returning null.
+    if (Platform.OS !== 'web') open(Notifications.getLastNotificationResponse());
     const sub = Notifications.addNotificationResponseReceivedListener(open);
     return () => sub.remove();
   }, [userId, setupDone, router]);
@@ -198,47 +224,34 @@ function RootNav() {
 
   const signedIn = session !== null;
 
-  // A session the API refused (lib/use-query.ts) lands the user on the first
-  // signed-out screen, the funnel, with no word about why. Open sign-in over
-  // it, where the subtitle says the session ended; the note is spent the
-  // moment a session exists again.
-  useEffect(() => {
-    if (signedIn) {
-      clearSessionEnded();
-      return;
-    }
-    if (!mounted || !sessionEnded()) return;
-    // Next tick: the guards above have to apply before the push can resolve.
-    const timer = setTimeout(() => router.push('/(auth)/sign-in'), 0);
-    return () => clearTimeout(timer);
-  }, [signedIn, mounted, router]);
-
   return (
     <ThemeProvider value={AppTheme}>
       <StatusBar style="dark" />
       <SetupGateContext.Provider value={gate}>
         {mounted ? (
           <View style={styles.flex}>
-            {/* The routing gate. A guard that turns false removes its screens
-                from the Stack; when no screen is left, the Stack lands on the
-                FIRST screen still allowed. Hence the order: onboarding first
-                (where guests and anyone mid-setup belong), then sign-in, then
-                the tabs (the first thing left once setup is done). */}
+            {/* The routing gate. Expo Router 58 keeps a screen whose guard
+                turns false in the Stack: if it is on top, it is REPLACED by its
+                group's `redirectTo` (a new screen, never one already in the
+                Stack); the others are removed. Without a `redirectTo` the
+                target is the first allowed route in FILE order, which is
+                sign-in for a guest and the paywall mid-setup - so every group
+                names it: the funnel (guests and anyone mid-setup) or the tabs. */}
             <Stack screenOptions={screenOptions}>
-              <Stack.Protected guard={!signedIn || setupDone !== true}>
+              <Stack.Protected guard={!signedIn || setupDone !== true} redirectTo="/">
                 <Stack.Screen
                   name="onboarding"
                   options={{ headerShown: false, gestureEnabled: false, animation: 'fade' }}
                 />
               </Stack.Protected>
 
-              {/* Signed out only. Signing in removes it, which pops back to
-                  the funnel underneath without remounting it. */}
-              <Stack.Protected guard={!signedIn}>
-                <Stack.Screen name="(auth)" options={{ headerShown: false }} />
-              </Stack.Protected>
+              {/* Not guarded: a guard's redirect would replace sign-in with a
+                  second funnel on top of the one that opened it. Sign-in leaves
+                  on its own once a session lands, back to the funnel underneath
+                  without remounting it. */}
+              <Stack.Screen name="(auth)" options={{ headerShown: false }} />
 
-              <Stack.Protected guard={signedIn && setupDone === true}>
+              <Stack.Protected guard={signedIn && setupDone === true} redirectTo="/onboarding">
                 <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
                 <Stack.Screen name="call/[id]" options={{ title: 'Call' }} />
                 <Stack.Screen name="assistant/[id]" options={{ title: 'Receptionist' }} />
@@ -256,7 +269,7 @@ function RootNav() {
               {/* Any signed-in user, setup finished or not: the paywall is
                   where a subscription is bought or restored, and deleting the
                   account must be possible before setup is done (5.1.1(v)). */}
-              <Stack.Protected guard={signedIn}>
+              <Stack.Protected guard={signedIn} redirectTo="/onboarding">
                 <Stack.Screen
                   name="paywall"
                   options={{ presentation: 'modal', headerShown: false }}
@@ -269,6 +282,7 @@ function RootNav() {
               {/* Not listed, so never guarded: +not-found (a stray link can
                   arrive in any state) sets its own options. */}
             </Stack>
+            <SessionEndedSignIn signedIn={signedIn} />
           </View>
         ) : null}
 
@@ -276,6 +290,37 @@ function RootNav() {
       </SetupGateContext.Provider>
     </ThemeProvider>
   );
+}
+
+/**
+ * A session the API refused (lib/use-query.ts) lands the user on the first
+ * signed-out screen, the funnel, with no word about why. This opens sign-in
+ * over it, where the subtitle says the session ended; the note is spent the
+ * moment a session exists again.
+ *
+ * It waits until the funnel is on top. A screen that just lost its guard is
+ * replaced by the funnel, and if sign-in got there first, that replace takes
+ * sign-in instead. Waiting a tick is not enough: on web the replace came after
+ * a zero timer.
+ */
+function SessionEndedSignIn({ signedIn }: { signedIn: boolean }) {
+  const router = useRouter();
+  const pathname = usePathname();
+  // Once per sign-out: Back from sign-in stays on the funnel.
+  const opened = useRef(false);
+
+  useEffect(() => {
+    if (signedIn) {
+      clearSessionEnded();
+      opened.current = false;
+      return;
+    }
+    if (opened.current || pathname !== '/onboarding' || !sessionEnded()) return;
+    opened.current = true;
+    router.push('/(auth)/sign-in');
+  }, [signedIn, pathname, router]);
+
+  return null;
 }
 
 /**
@@ -304,7 +349,7 @@ function LaunchOverlay() {
 const styles = StyleSheet.create({
   flex: { flex: 1 },
   overlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: colors.ink,

@@ -20,6 +20,8 @@ Rules this copy follows (from the web repo's claim audit, keep them):
 | Keywords | 100 | answering service,virtual,spa,phone,missed,booking,appointment,scheduler,voicemail,front desk,salon |
 | Category | | Business (secondary: Productivity) |
 | Age rating | | 4+ |
+| Support URL | | https://aireceptionistnow.com/support |
+| Marketing URL | | https://aireceptionistnow.com |
 
 Keywords: the name and subtitle already index "AI", "receptionist", "answer", "business",
 "call"; repeating them wastes characters. Check the 100-character count after edits.

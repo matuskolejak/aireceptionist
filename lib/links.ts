@@ -18,6 +18,11 @@ export const SITE = 'https://aireceptionistnow.com';
 export const PRIVACY_URL = `${SITE}/privacy-policy?app=1`;
 export const TERMS_URL = `${SITE}/terms-of-service?app=1`;
 export const SUPPORT_URL = `${SITE}/support?app=1`;
+/**
+ * The call-forwarding help, opened from the go-live screen. It points at the support page,
+ * which supports app mode (?app=1); the blog does not and links on to pricing.
+ */
+export const FORWARDING_GUIDE_URL = `${SITE}/support?app=1#forward-calls`;
 export const ACCOUNT_DELETE_URL = `${SITE}/account/delete?app=1`;
 
 /** Apple's standard EULA - the Terms of Use an iOS subscription paywall must link. */
@@ -40,8 +45,8 @@ export const APPLE_SUBSCRIPTIONS_URL = 'https://apps.apple.com/account/subscript
 /**
  * Place a call.
  *
- * `tel:` fails on any device with no dialer, and the build ships to iPad
- * (`ios.supportsTablet`). Dropping the rejection leaves a row that does nothing
+ * `tel:` fails on any device with no dialer, and iPhone apps also run on iPad in
+ * compatibility mode. Dropping the rejection leaves a row that does nothing
  * at all, which reads as a broken app rather than an unsupported device.
  */
 export async function dial(e164: string): Promise<void> {

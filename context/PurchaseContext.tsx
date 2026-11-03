@@ -14,7 +14,7 @@ import { Alert, Platform } from 'react-native';
 
 import { useAuth } from '@/context/AuthContext';
 import { api, ApiError } from '@/lib/api';
-import { APPLE_SUBSCRIPTIONS_URL, openExternal, PLAY_SUBSCRIPTIONS_URL } from '@/lib/links';
+import { APPLE_SUBSCRIPTIONS_URL, openExternal, openInApp, PLAY_SUBSCRIPTIONS_URL, SUPPORT_URL } from '@/lib/links';
 import {
   createAdapter,
   isLiveStripe,
@@ -106,7 +106,31 @@ export const CONFIRMING_MESSAGE =
   'We could not confirm your purchase yet. It will finish automatically next time you open the app.';
 const NOT_AVAILABLE_MESSAGE = 'Purchases not available. Please try again later.';
 const GENERIC_MESSAGE = 'Something went wrong. Please try again.';
-const NO_SUBSCRIPTION_MESSAGE = 'We could not find an active subscription for this account.';
+/**
+ * After a 400 from verify. The server refused this transaction itself (expired,
+ * refunded, unreadable), so Restore would send it again and fail the same way.
+ */
+const SUPPORT_HINT = 'If the store already charged you, contact support and we will sort it out.';
+// Names the store account: "this account" read as the app account, whose plan may be active on the web.
+const NO_SUBSCRIPTION_MESSAGE =
+  Platform.OS === 'android'
+    ? 'This Google account has no active Google Play subscription to restore.'
+    : 'This Apple Account has no active App Store subscription to restore.';
+/**
+ * Restore found nothing, but the plan is live elsewhere (the purchase guard's
+ * rule). Say so, or "No subscription found" reads as if the plan were gone.
+ */
+function billedElsewhereMessage(billing: BillingSnapshot | null): string | null {
+  const otherStore = PLATFORM_PROVIDER === 'apple' ? 'google' : 'apple';
+  const where = isLiveStripe(billing)
+    ? 'Your plan is billed through your web account'
+    : billing?.active && billing.provider === 'comp'
+      ? 'Your account is complimentary'
+      : billing?.active && billing.provider === otherStore
+        ? `Your plan is active through ${otherStore === 'google' ? 'Google Play' : 'the App Store'}`
+        : null;
+  return where ? `${where}, so there is nothing to restore here.` : null;
+}
 const STRIPE_ACTIVE_MESSAGE =
   Platform.OS === 'android'
     ? 'Your plan is already billed through your web account, so this Google Play purchase was not added to it. To avoid paying twice, cancel it in Google Play > Payments & subscriptions > Subscriptions and ask Google for a refund.'
@@ -559,7 +583,15 @@ export function PurchaseProvider({ children }: { children: ReactNode }) {
             dequeue(tx);
             const message = result.code === 'stripe_active' ? STRIPE_ACTIVE_MESSAGE : result.message;
             if (opts.reason === 'purchase') {
-              Alert.alert('Purchase failed', message);
+              // A 409 (billed on the web, or another account) already says what to do.
+              if (result.status === 400) {
+                Alert.alert('Purchase failed', `${message}\n\n${SUPPORT_HINT}`, [
+                  { text: 'OK', style: 'cancel' },
+                  { text: 'Contact support', onPress: () => void openInApp(SUPPORT_URL) },
+                ]);
+              } else {
+                Alert.alert('Purchase failed', message);
+              }
             } else if (opts.reason === 'redelivery') {
               const keys = skipKeys(uid, tx);
               await addSkip(result.status === 409 ? keys.chain : keys.tx, { code: result.code, message });
@@ -729,7 +761,9 @@ export function PurchaseProvider({ children }: { children: ReactNode }) {
         Alert.alert('Restore failed', firstTerminal.message);
         return { restored: false };
       }
-      Alert.alert('No subscription found', NO_SUBSCRIPTION_MESSAGE);
+      const elsewhere = billedElsewhereMessage(billingRef.current);
+      if (elsewhere) Alert.alert('Nothing to restore', elsewhere);
+      else Alert.alert('No subscription found', NO_SUBSCRIPTION_MESSAGE);
       return { restored: false };
     } catch (error) {
       const message = error instanceof Error && error.message ? error.message : GENERIC_MESSAGE;

@@ -10,6 +10,7 @@ import {
   View,
   type AccessibilityActionEvent,
   type GestureResponderEvent,
+  type ViewInstance,
 } from 'react-native';
 
 import { Icon } from '@/components/Icon';
@@ -122,7 +123,7 @@ export function RecordingPlayer({ callId }: { callId: string }) {
   const durationRef = useRef(0);
   widthRef.current = width;
   durationRef.current = duration;
-  const barRef = useRef<View>(null);
+  const barRef = useRef<ViewInstance>(null);
   /** The bar's x in window coords, needed to turn a drag's absolute x into a position. */
   const originRef = useRef(0);
   /** Last scrub target. Read on release, because a tap produces no move event. */

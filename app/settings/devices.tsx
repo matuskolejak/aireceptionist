@@ -12,6 +12,8 @@ import {
   ICON,
   SkeletonRows,
   StaleNotice,
+  useLargeText,
+  useLineLimit,
 } from '@/components/ui';
 import { colors, fonts, spacing, type } from '@/constants/theme';
 import { useAuth } from '@/context/AuthContext';
@@ -35,6 +37,10 @@ import { useQuery } from '@/lib/use-query';
  * not offering it. The phone in your hand offers a real Sign out instead.
  */
 export default function DevicesScreen() {
+  const oneLine = useLineLimit(1);
+  // At the accessibility sizes the button goes under the device text: beside
+  // it, the name broke inside a word ("Simul / ator").
+  const stacked = useLargeText();
   const insets = useSafeAreaInsets();
   const { signOut } = useAuth();
   const { data, error, loading, refresh } = useQuery<{ devices: AccountDevice[] }>(
@@ -47,7 +53,7 @@ export default function DevicesScreen() {
     const name = device.model || 'this device';
     Alert.alert(
       `Remove ${name}?`,
-      'It stops call alerts to that phone. It stays signed in until someone signs out on it.',
+      'It stops call alerts to that device. It stays signed in until someone signs out on it.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -137,6 +143,17 @@ export default function DevicesScreen() {
               .filter(Boolean)
               .join(' · ');
             const seen = `Last active ${relTimeOf(device.lastSeenAt) || 'recently'}`;
+            const action = (
+              <Button
+                label={device.current ? 'Sign out' : 'Remove'}
+                accessibilityLabel={device.current ? 'Sign out of this phone' : `Remove ${name}`}
+                size="pill"
+                variant="danger"
+                busy={busy === device.deviceId}
+                disabled={busy !== null}
+                onPress={() => (device.current ? confirmSignOut(device) : confirmRemove(device))}
+              />
+            );
             return (
               <View key={device.deviceId} style={[styles.row, i > 0 && styles.divided]}>
                 <Icon
@@ -144,36 +161,29 @@ export default function DevicesScreen() {
                   size={ICON.action}
                   color={colors.textSecondary}
                 />
-                <View
-                  style={styles.flex}
-                  accessible
-                  accessibilityLabel={[name, device.current ? 'This phone' : null, meta, seen]
-                    .filter(Boolean)
-                    .join(', ')}
-                >
-                  <View style={styles.titleRow}>
-                    <Text style={styles.model} numberOfLines={1}>
-                      {name}
-                    </Text>
-                    {device.current ? <Badge label="This phone" tone="success" /> : null}
+                <View style={styles.flex}>
+                  <View
+                    accessible
+                    accessibilityLabel={[name, device.current ? 'This phone' : null, meta, seen]
+                      .filter(Boolean)
+                      .join(', ')}
+                  >
+                    <View style={styles.titleRow}>
+                      <Text style={styles.model} numberOfLines={oneLine}>
+                        {name}
+                      </Text>
+                      {device.current ? <Badge label="This phone" tone="success" /> : null}
+                    </View>
+                    {meta ? (
+                      <Text style={styles.meta} numberOfLines={oneLine}>
+                        {meta}
+                      </Text>
+                    ) : null}
+                    <Text style={styles.meta}>{seen}</Text>
                   </View>
-                  {meta ? (
-                    <Text style={styles.meta} numberOfLines={1}>
-                      {meta}
-                    </Text>
-                  ) : null}
-                  <Text style={styles.meta}>{seen}</Text>
+                  {stacked ? <View style={styles.stackedAction}>{action}</View> : null}
                 </View>
-
-                <Button
-                  label={device.current ? 'Sign out' : 'Remove'}
-                  accessibilityLabel={device.current ? 'Sign out of this phone' : `Remove ${name}`}
-                  size="pill"
-                  variant="danger"
-                  busy={busy === device.deviceId}
-                  disabled={busy !== null}
-                  onPress={() => (device.current ? confirmSignOut(device) : confirmRemove(device))}
-                />
+                {stacked ? null : action}
               </View>
             );
           })}
@@ -208,4 +218,5 @@ const styles = StyleSheet.create({
   titleRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, flexWrap: 'wrap' },
   model: { ...type.body, fontFamily: fonts.semibold, flexShrink: 1 },
   meta: { ...type.caption, marginTop: 2 },
+  stackedAction: { marginTop: spacing.sm, alignSelf: 'flex-start' },
 });

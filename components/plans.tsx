@@ -42,6 +42,9 @@ function planLines(plan: OnboardingPlan): string[] {
   ];
 }
 
+/** Included lines that repeat a number planLines already shows (the web copy lists them again). */
+const REPEATS_A_LIMIT = /\bminutes?\b|\bphone numbers?\b|\b(?:parallel|concurrent) calls?\b/i;
+
 /** "Solo, €119.99 per month, 1,000 minutes included, 1 phone number, one call at a time, ..." */
 export function planA11yLabel(
   plan: OnboardingPlan,
@@ -204,7 +207,7 @@ export function PlanCard({
   product?: StoreProduct | null;
   priceSource?: PriceSource;
   selected?: boolean;
-  /** 'full' also lists `storeIncluded` under an Included heading (the paywall route). */
+  /** 'full' also lists `storeIncluded`, minus the limits above, under an Included heading (the paywall route). */
   variant?: 'funnel' | 'full';
   /** Replaces the 'Most popular' ribbon, e.g. 'Current plan'. */
   badge?: string;
@@ -214,7 +217,7 @@ export function PlanCard({
 }) {
   const disabled = priceSource === 'missing';
   const ribbon = badge ?? (plan.highlight ? 'Most popular' : undefined);
-  const included = variant === 'full' ? (plan.storeIncluded ?? []) : [];
+  const included = variant === 'full' ? (plan.storeIncluded ?? []).filter((line) => !REPEATS_A_LIMIT.test(line)) : [];
 
   const body = (
     <>

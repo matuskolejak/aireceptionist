@@ -345,6 +345,7 @@ function detailOf(c: MockCall, tz: string, now: number): CallDetail {
     sid: c.sid,
     date: c.startedAt,
     dateLabel: dateTimeLabel(tz)(c.startedAt),
+    timezone: tz,
     status: c.status,
     statusLabel: statusWords(c.status),
     direction: 'inbound',
@@ -367,6 +368,7 @@ function detailOf(c: MockCall, tz: string, now: number): CallDetail {
       return { id: i + 1, role: t.role, text: t.text, tsMs, atLabel: clock(new Date(start + tsMs).toISOString()) };
     }),
     actions: c.actions,
+    reported: Boolean(c.reported),
   };
 }
 
@@ -404,8 +406,10 @@ route('GET', `/api/mobile/calls/${ID}`, ({ s, params, now }) => {
 });
 
 route('POST', `/api/mobile/calls/${ID}/report`, ({ s, params, body }) => {
-  if (!s.calls.some((c) => c.id === params[0])) throw new ApiError(404, 'Call not found.');
+  const c = s.calls.find((x) => x.id === params[0]);
+  if (!c) throw new ApiError(404, 'Call not found.');
   if (!str(body.message)) throw new ApiError(400, 'Say what went wrong first.');
+  c.reported = true;
   return { ok: true };
 });
 
@@ -614,11 +618,33 @@ route('POST', '/api/mobile/assistants', ({ s, body, now }) => {
   return { id, warning: null };
 });
 
+/**
+ * web lib/dashboard/assistant-setup.ts buildSetupItems and setupProgress: the flags follow the stored
+ * fields, so a save in a sheet flips its row's badge like it does against the server.
+ */
+function setupOf(a: MockAssistant, calendars: AssistantDetail['calendars']): AssistantDetail['setup'] {
+  const items: AssistantDetail['setup']['items'] = [
+    { key: 'voice', done: a.voiceId.trim().length > 0 },
+    { key: 'greeting', done: a.greeting.trim().length > 0 },
+    { key: 'transfer', done: (a.escalation.targets[0]?.number ?? '').trim().length > 0 },
+    { key: 'calendar', done: calendars.some((c) => c.level !== 'none') },
+    { key: 'behaviour', done: a.systemPrompt.trim().length > 0 },
+  ];
+  const done = items.filter((i) => i.done).length;
+  return { items, percent: Math.round((done / items.length) * 100) };
+}
+
 route('GET', `/api/mobile/assistants/${ID}`, ({ s, params, query }): AssistantDetail => {
   const a = findAssistant(s, params[0]);
   const plan = planOf(s);
   const number = s.numbers.find((n) => n.assistantId === a.id);
   const { createdAt: _createdAt, ...stored } = a;
+  const calendars = s.connections.map((c) => ({
+    id: c.id,
+    provider: c.provider,
+    name: c.name,
+    level: a.calendars.find((x) => x.id === c.id)?.level ?? 'none',
+  }));
   return {
     ...stored,
     number: number?.e164 ?? '',
@@ -626,12 +652,8 @@ route('GET', `/api/mobile/assistants/${ID}`, ({ s, params, query }): AssistantDe
     ...resolveTimezone(s, query.tz),
     planActive: plan.active,
     canAddNumber: numberRefusal(s) === null,
-    calendars: s.connections.map((c) => ({
-      id: c.id,
-      provider: c.provider,
-      name: c.name,
-      level: a.calendars.find((x) => x.id === c.id)?.level ?? 'none',
-    })),
+    calendars,
+    setup: setupOf(a, calendars),
     numberCountries: numberCountries(plan.active ? plan.minutesIncluded : null),
   };
 });
@@ -641,6 +663,11 @@ route('PATCH', `/api/mobile/assistants/${ID}`, ({ s, params, body }) => {
   const sections = Array.isArray(body.sections) ? body.sections.filter((x): x is string => typeof x === 'string') : [];
   const fields = body.fields && typeof body.fields === 'object' ? (body.fields as Body) : {};
   if (sections.length === 0) throw new ApiError(400, 'Nothing to save.');
+  // Like the server: an address the mailer would skip is refused before anything is saved.
+  const emailTo = sections.includes(SECTION.email) && fields.email_to != null ? String(fields.email_to).trim() : '';
+  if (emailTo && !EMAIL.test(emailTo)) {
+    throw new ApiError(400, 'Enter a full email address, like you@business.com.', 'invalid_email');
+  }
   applyAssistantPatch(a, sections, fields);
   return { ok: true, warning: null };
 });
@@ -839,7 +866,8 @@ route('POST', '/api/mobile/knowledge', ({ s, body, now }) => {
     const gap = k.gaps.find((g) => g.id === signalId);
     if (!gap) throw new ApiError(404, 'That question was already answered or dismissed.');
     k.gaps = k.gaps.filter((g) => g.id !== signalId);
-    k.verified = [k.verified, `${gap.topic} | ${answer}`].filter(Boolean).join('\n');
+    // The server's shape (web lib/knowledge/sources.ts formatVerifiedLines): Q:/A: pairs, a blank line between.
+    k.verified = [k.verified, `Q: ${gap.topic}\nA: ${answer}`].filter(Boolean).join('\n\n');
     return { ok: true, businessId };
   }
   if (action === 'notes') {
@@ -1152,7 +1180,7 @@ route('POST', '/api/mobile/onboarding', ({ s, body, now }) => {
         companyWebsite: str(body.companyWebsite),
       });
       if (alertPhone && !E164.test(alertPhone)) {
-        throw new ApiError(400, 'Enter the alert number with its country code, like +1 555 123 4567.');
+        throw new ApiError(400, 'Enter the alert number with its country code, starting with +.');
       }
       if (alertsEmail && !EMAIL.test(alertsEmail)) throw new ApiError(400, 'That email does not look right.');
       return { ok: true, step: 2 };

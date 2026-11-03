@@ -1,6 +1,6 @@
 import * as Haptics from 'expo-haptics';
 import { Stack, useRouter } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   KeyboardAvoidingView,
@@ -32,12 +32,15 @@ import {
   Skeleton,
   SkeletonCard,
   StaleNotice,
+  useLargeText,
+  useLineLimit,
 } from '@/components/ui';
 import { colors, fonts, MAX_FONT_SCALE, radius, spacing, type } from '@/constants/theme';
 import { api, ApiError } from '@/lib/api';
 import { relTimeOf } from '@/lib/format';
 import type { KnowledgeGap, KnowledgeSourceRow } from '@/lib/types';
 import { useQuery } from '@/lib/use-query';
+import { answerLimitProblem, droppedAnswerLines } from '@/lib/verified-answers';
 
 /**
  * What the receptionist knows - reached from the Receptionist tab's "What it
@@ -50,6 +53,7 @@ import { useQuery } from '@/lib/use-query';
  * upload stays on the web for now and the footnote says so.
  */
 export default function KnowledgeScreen() {
+  const largeText = useLargeText();
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [business, setBusiness] = useState<string | undefined>(undefined);
@@ -207,16 +211,21 @@ export default function KnowledgeScreen() {
                   {data.digestPending
                     ? 'Summarizing what it learned...'
                     : data.digest ||
-                      'Nothing yet. Add your website or type what callers ask about, and it learns.'}
+                      // Like the web (lib/dashboard/knowledge-digest.ts): with notes or
+                      // sources, an empty digest means the summary failed or is not
+                      // ready, so the owner is not told to add content again.
+                      (data.notes.trim() || data.sources.length > 0
+                        ? 'Your receptionist already uses what you added below. The short summary is not ready yet.'
+                        : 'Nothing yet. Add your website or type what callers ask about, and it learns.')}
                 </Text>
               </Card>
 
-              <View style={styles.teachRow}>
+              <View style={[styles.teachRow, largeText && styles.teachRowStacked]}>
                 <Button
                   label="Teach it something"
                   icon="add"
                   onPress={() => setTeachOpen(true)}
-                  style={styles.flex}
+                  style={largeText ? undefined : styles.flex}
                 />
                 {/* Sized to its label, so the main action keeps one line. */}
                 <Button
@@ -498,8 +507,11 @@ function MarketRow({
   onCleared: (id: number) => void;
 }) {
   const { busy, failure, run } = useGapAction(gap, onCleared);
+  // At the accessibility sizes Dismiss goes under the text: beside it, the
+  // question broke inside a word ("Saturda / ys?").
+  const stacked = useLargeText();
   return (
-    <View style={styles.marketRow}>
+    <View style={[styles.marketRow, stacked && styles.marketRowStacked]}>
       <View style={styles.flex} accessible>
         <Text style={styles.marketText}>
           <Text style={styles.marketTopic}>{gap.topic}</Text>
@@ -533,6 +545,7 @@ function SourceRow({
   divided: boolean;
   onRemove: () => Promise<void>;
 }) {
+  const oneLine = useLineLimit(1);
   const [busy, setBusy] = useState(false);
   const icon =
     source.kind === 'website' ? 'globe-outline' : source.kind === 'pdf' ? 'document-outline' : 'create-outline';
@@ -573,7 +586,7 @@ function SourceRow({
         accessible
         accessibilityLabel={[kindLabel, source.title, source.summary, added].filter(Boolean).join(', ')}
       >
-        <Text style={styles.sourceTitle} numberOfLines={1}>
+        <Text style={styles.sourceTitle} numberOfLines={oneLine}>
           {source.title}
         </Text>
         {Boolean(source.summary) && (
@@ -788,8 +801,14 @@ function NotesSheet({
   const dirty =
     draftNotes !== seeded.current.notes || draftVerified !== seeded.current.verified;
 
+  // Lines the server would drop on save without a word (lib/verified-answers.ts).
+  // Save stays off until they are fixed, so nothing typed is lost silently.
+  // Pairs past 25 and halves over the length limits are cut the same way.
+  const dropped = useMemo(() => droppedAnswerLines(draftVerified), [draftVerified]);
+  const limitProblem = useMemo(() => answerLimitProblem(draftVerified), [draftVerified]);
+
   async function save() {
-    if (!consent) return;
+    if (!consent || dropped.length || limitProblem) return;
     setBusy(true);
     setState(null);
     try {
@@ -820,7 +839,7 @@ function NotesSheet({
       visible={visible}
       title="Notes and exact answers"
       onClose={requestClose}
-      footer={<SaveBar onSave={save} busy={busy} dirty={dirty && consent} state={state} />}
+      footer={<SaveBar onSave={save} busy={busy} dirty={dirty && consent && dropped.length === 0 && !limitProblem} state={state} />}
     >
       <AiConsent accepted={consent} onChange={setConsent} />
       <View style={{ height: spacing.lg }} />
@@ -836,12 +855,18 @@ function NotesSheet({
         value={draftVerified}
         onChangeText={setDraftVerified}
         // Q:/A: is the only shape the server parses, and it is what the field is
-        // seeded with. Anything else is dropped on save without a word, so a hint
-        // that suggests another separator quietly deletes the answers.
+        // seeded with. The server drops any other line, so the error names the
+        // first such line and Save stays off until it is fixed. Keep the hint Q:/A:
+        // too: one that suggests another separator would block every save.
         placeholder={'Q: Do you take walk-ins?\nA: Yes, before 4pm.\n\nQ: Is there parking?\nA: Free lot behind the building.'}
         multiline
         autoCapitalize="sentences"
         hint="One Q line, one A line, a blank line between pairs. These are said back word for word."
+        error={
+          dropped.length
+            ? `This line will not be saved: "${dropped[0]}"${dropped.length > 1 ? ` (and ${dropped.length - 1} more)` : ''}. Put the question on a Q: line and the answer on the next A: line.`
+            : (limitProblem ?? undefined)
+        }
       />
     </Sheet>
   );
@@ -867,6 +892,8 @@ const styles = StyleSheet.create({
   },
   skeletonLines: { gap: spacing.sm, marginTop: spacing.md },
   teachRow: { flexDirection: 'row', gap: spacing.sm },
+  /** At the accessibility text sizes both labels cannot fit side by side. */
+  teachRowStacked: { flexDirection: 'column' },
   teachHint: { ...type.footnote, marginTop: -spacing.xs },
   gapRow: { paddingVertical: spacing.md },
   gapTopic: { ...type.body, fontFamily: fonts.medium },
@@ -895,6 +922,7 @@ const styles = StyleSheet.create({
   // inkSoft, not textSecondary: grey on the grey fill is 4.35:1 and fails.
   marketTitle: { ...type.label, color: colors.inkSoft },
   marketRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  marketRowStacked: { flexDirection: 'column', alignItems: 'flex-start' },
   marketText: { ...type.caption, color: colors.inkSoft },
   marketTopic: { fontFamily: fonts.medium, color: colors.text },
   sourceRow: {
