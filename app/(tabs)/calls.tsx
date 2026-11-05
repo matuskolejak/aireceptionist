@@ -53,7 +53,13 @@ function serverQuery(raw: string): string {
   if (/^[\d\s()+.-]+$/.test(q)) {
     const digits = q.replace(/\D/g, '');
     if (!digits) return '';
-    return q.startsWith('+') ? `+${digits}` : digits;
+    if (q.startsWith('+')) return `+${digits}`;
+    // 00 is the plus typed the long way: "00353 85..." is "+35385...".
+    if (/^00[1-9]/.test(digits)) return `+${digits.slice(2)}`;
+    // A national number keeps its trunk 0 ("085 765 4321"); the stored E.164
+    // form drops it (+353857654321), so match on the digits after it.
+    if (/^0[1-9]/.test(digits)) return digits.slice(1);
+    return digits;
   }
   const words = q.toLowerCase();
   if (/appointment|booked/.test(words)) return 'booked';
@@ -150,6 +156,7 @@ export default function CallsScreen() {
   // an unfiltered list.
   useEffect(() => {
     if (!params.status) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- consumes a deep-link param from the router; setParams below must run after commit.
     setStatus(params.status);
     // The param has to be consumed, not just read. Home pushes the same literal
     // `?status=unanswered` every time, so a second tap of the Missed tile leaves
@@ -180,11 +187,15 @@ export default function CallsScreen() {
     null,
   );
 
-  // A new filter or search starts again from its first page.
-  useEffect(() => {
+  // A new filter or search starts again from its first page. Reset during
+  // render (not in an effect), so the old filter's pages never commit once more.
+  const filterKey = keyOf(status, debouncedQ);
+  const [pagesKey, setPagesKey] = useState(filterKey);
+  if (pagesKey !== filterKey) {
+    setPagesKey(filterKey);
     setOlder(null);
     setMore(null);
-  }, [status, debouncedQ]);
+  }
 
   const dataKey = data ? keyOf(data.status, data.q) : '';
   const { rows, nextCursor } = useMemo(() => mergePages(data, older), [data, older]);
@@ -197,7 +208,9 @@ export default function CallsScreen() {
   // scroll, and a second page request for the same cursor would duplicate it.
   const inFlight = useRef<string | null>(null);
   const latestKey = useRef(dataKey);
-  latestKey.current = dataKey;
+  useEffect(() => {
+    latestKey.current = dataKey;
+  }, [dataKey]);
 
   const loadMore = useCallback(async () => {
     if (!data || !nextCursor || loading) return;

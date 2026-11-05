@@ -138,7 +138,7 @@ export function useQuery<T>(
         }
       }
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/use-memo -- deps are the caller's list, forwarded as in useEffect.
     deps,
   );
 

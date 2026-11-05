@@ -153,7 +153,8 @@ Google Play)" (`../aireceptionistnow/BILLING.md`). In short:
   majors that duplicated the SDK 54 copies inside `expo`. Duplicate native
   modules are a build error waiting to happen, and expo-doctor's own words were
   "your app may crash outside of Expo Go". Both are now direct dependencies at
-  the SDK 54 versions. `expo-doctor` is 18/18.
+  the versions that match the installed SDK (now SDK 58; use `npx expo install`).
+  `expo-doctor` is 18/18.
 - **`expo-audio` was declaring microphone permissions the app never uses.** Its
   default config adds `NSMicrophoneUsageDescription` and Android
   `RECORD_AUDIO`; this app only ever plays a recording back. `RECORD_AUDIO` is a

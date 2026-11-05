@@ -1,5 +1,5 @@
 import * as Haptics from 'expo-haptics';
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { StyleSheet, Text, View, type GestureResponderEvent } from 'react-native';
 
 import { colors, fonts, MAX_FONT_SCALE, shadow, spacing, type } from '@/constants/theme';
@@ -39,6 +39,27 @@ function callsText(n: number): string {
   return `${n} ${n === 1 ? 'call' : 'calls'}`;
 }
 
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/**
+ * Bar `i` as a date, "Mon 3 Nov". The series ends today in the account's zone
+ * and labels each bar with its day of the month only, so the last label pins
+ * the end: the phone's today, or the day either side when the two zones sit
+ * across midnight. Null when the labels are not days of the month.
+ */
+function barDate(data: Bar[], i: number, now: Date = new Date()): string | null {
+  const lastDay = Number(data[data.length - 1]?.label);
+  for (const shift of [0, -1, 1]) {
+    // Noon, so a DST change at midnight cannot move the date.
+    const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + shift, 12);
+    if (end.getDate() !== lastDay) continue;
+    const day = new Date(end.getFullYear(), end.getMonth(), end.getDate() - (data.length - 1 - i), 12);
+    return `${WEEKDAYS[day.getDay()]} ${day.getDate()} ${MONTHS[day.getMonth()]}`;
+  }
+  return null;
+}
+
 export function BarChart({ data, height = 120 }: { data: Bar[]; height?: number }) {
   const [width, setWidth] = useState(0);
   const [selected, setSelected] = useState<number | null>(null);
@@ -57,9 +78,11 @@ export function BarChart({ data, height = 120 }: { data: Bar[]; height?: number 
   // on the shape rather than the array, so a background refetch of the same
   // days does not drop what the owner is reading.
   const seriesKey = `${data.length}:${data[0]?.label ?? ''}`;
-  useEffect(() => {
+  const [shownKey, setShownKey] = useState(seriesKey);
+  if (shownKey !== seriesKey) {
+    setShownKey(seriesKey);
     setSelected(null);
-  }, [seriesKey]);
+  }
 
   if (data.length === 0) {
     return <Text style={styles.empty}>No calls yet.</Text>;
@@ -70,10 +93,14 @@ export function BarChart({ data, height = 120 }: { data: Bar[]; height?: number 
   const total = data.reduce((sum, d) => sum + d.value, 0);
   // `max` is clamped to 0 above, so an all-zero series would otherwise
   // announce a peak on whichever day happened to come first.
-  const peak = total > 0 ? data.find((d) => d.value === max) : undefined;
-  const summary = peak
-    ? `Calls per day, last ${n} days, total ${total}, busiest day ${peak.label} with ${max}.`
-    : `Calls per day, last ${n} days, no calls in this period.`;
+  const peak = total > 0 ? data.findIndex((d) => d.value === max) : -1;
+  // Worded like the card's subtitle on Home: "Calls answered per day, last 30 days".
+  const summary =
+    peak >= 0
+      ? `Calls answered per day, last ${n} days. Total ${callsText(total)}. Busiest day: ${
+          barDate(data, peak) ?? `day ${data[peak].label}`
+        }, ${callsText(max)}.`
+      : `Calls answered per day, last ${n} days. No calls in this period.`;
 
   const col = width > 0 ? (width - GAP * (n - 1)) / n : 0;
   const centerOf = (i: number) => i * (col + GAP) + col / 2;
@@ -187,24 +214,24 @@ export function BarChart({ data, height = 120 }: { data: Bar[]; height?: number 
           {' '}
         </Text>
         {width > 0 &&
-          data.map((d, i) =>
-            (n - 1 - i) % LABEL_EVERY === 0 ? (
+          data.map((d, i) => {
+            if ((n - 1 - i) % LABEL_EVERY !== 0) return null;
+            // A label the chart edge pushes inward is aligned to that edge, so
+            // its text still sits under its bar: today's is the last bar.
+            const centered = centerOf(i) - LABEL_WIDTH / 2;
+            const left = Math.max(0, Math.min(width - LABEL_WIDTH, centered));
+            const textAlign = centered > left ? 'right' : centered < left ? 'left' : 'center';
+            return (
               <Text
                 key={`${d.label}-label-${i}`}
-                style={[
-                  styles.axisLabel,
-                  {
-                    left: Math.max(0, Math.min(width - LABEL_WIDTH, centerOf(i) - LABEL_WIDTH / 2)),
-                  },
-                  i === n - 1 && styles.axisLabelToday,
-                ]}
+                style={[styles.axisLabel, { left, textAlign }, i === n - 1 && styles.axisLabelToday]}
                 numberOfLines={1}
                 maxFontSizeMultiplier={MAX_FONT_SCALE}
               >
                 {d.label}
               </Text>
-            ) : null,
-          )}
+            );
+          })}
       </View>
     </View>
   );

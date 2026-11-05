@@ -146,7 +146,9 @@ export function AiConsent({
 }) {
   const [stored, setStored] = useState<boolean | null>(null);
   const onChangeRef = useRef(onChange);
-  onChangeRef.current = onChange;
+  useEffect(() => {
+    onChangeRef.current = onChange;
+  }, [onChange]);
 
   useEffect(() => {
     let alive = true;
@@ -244,7 +246,9 @@ export function PurchasesUnavailableNotice({ reason }: { reason: UnavailableReas
   const message =
     reason === 'expo-go'
       ? 'Purchases need the installed app from the App Store or Google Play.'
-      : 'Purchases are not available right now. Please try again later.';
+      : reason === 'restricted'
+        ? 'In-app purchases are turned off on this device. Check Settings, Screen Time, Content and Privacy Restrictions.'
+        : 'Purchases are not available right now. Please try again later.';
   return (
     <Notice tone="neutral" live>
       {message}

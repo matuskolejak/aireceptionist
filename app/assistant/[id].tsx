@@ -6,6 +6,7 @@ import * as SecureStore from 'expo-secure-store';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   Alert,
+  AppState,
   Platform,
   Pressable,
   RefreshControl,
@@ -54,6 +55,7 @@ import {
 } from '@/components/ui';
 import { colors, fonts, MAX_FONT_SCALE, radius, spacing, type } from '@/constants/theme';
 import { api, ApiError } from '@/lib/api';
+import { secondsLeft } from '@/lib/cooldown';
 import { formatPhone } from '@/lib/format';
 
 import { countryForLocale, deviceTimeZone } from '@/lib/locale';
@@ -171,6 +173,11 @@ export default function AssistantDetailScreen() {
     refresh,
   );
 
+  // A second tap while the first delete runs would fail on a receptionist that
+  // is already gone and report "Could not delete" for a delete that worked.
+  const deletingRef = useRef(false);
+  const [deleting, setDeleting] = useState(false);
+
   function confirmDelete() {
     Alert.alert(
       'Delete this receptionist?',
@@ -184,10 +191,17 @@ export default function AssistantDetailScreen() {
           text: 'Delete',
           style: 'destructive',
           onPress: async () => {
+            if (deletingRef.current) return;
+            deletingRef.current = true;
+            setDeleting(true);
             try {
               await api.deleteAssistant(String(id));
               router.back();
             } catch (err) {
+              // Only a failure turns Delete back on: after a success the screen is
+              // popping, and a second tap there would delete again and fail.
+              deletingRef.current = false;
+              setDeleting(false);
               Alert.alert('Could not delete', (err as Error).message);
             }
           },
@@ -402,6 +416,7 @@ export default function AssistantDetailScreen() {
           label="Delete this receptionist"
           variant="danger"
           onPress={confirmDelete}
+          busy={deleting}
           style={styles.delete}
         />
       </ScrollView>
@@ -473,13 +488,37 @@ function NumberBlock({
   onUpgrade: () => void;
 }) {
   const [busy, setBusy] = useState(false);
-  // The phone's region first, the way the web preselects by locale - never
-  // simply the first country in the list. Resolved against the list on every
-  // payload rather than once on mount: this block stays mounted across the
-  // paywall round trip, and the list that comes back after a purchase can
-  // differ from the one it was first seeded from.
+  // The business's country first (the number country picked in setup), so a
+  // number got again after an Unlink comes from where the customers are. Then
+  // the phone's region, the way the web preselects by locale - never simply the
+  // first country in the list. Resolved against the list on every payload
+  // rather than once on mount: this block stays mounted across the paywall
+  // round trip, and the list that comes back after a purchase can differ from
+  // the one it was first seeded from.
   const [choice, setCountry] = useState<string | null>(null);
-  const fallback = useMemo(() => countryForLocale(detail.numberCountries), [detail.numberCountries]);
+  // Read only while the picker is on screen. A failed read keeps the phone's
+  // region; the owner can still pick any country.
+  const needsCountry = !detail.number && detail.planActive;
+  const [businessCountry, setBusinessCountry] = useState('');
+  useEffect(() => {
+    if (!needsCountry) return;
+    let alive = true;
+    api
+      .onboarding()
+      .then((s) => {
+        if (alive) setBusinessCountry((s.config?.country ?? '').toUpperCase());
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [needsCountry]);
+  const fallback = useMemo(
+    () =>
+      detail.numberCountries.find((c) => c.code === businessCountry)?.code ??
+      countryForLocale(detail.numberCountries),
+    [businessCountry, detail.numberCountries],
+  );
   const chosen = choice ? detail.numberCountries.find((c) => c.code === choice) : undefined;
   const country = chosen ? chosen.code : fallback;
   const picked = chosen ?? detail.numberCountries.find((c) => c.code === country);
@@ -568,7 +607,7 @@ function NumberBlock({
         ) : (
           <Button label="Subscribe to get a number" icon="call-outline" onPress={onSubscribe} />
         )}
-        <TestCall detail={detail} />
+        <TestCall detail={detail} onUpgrade={onUpgrade} />
       </View>
     );
   }
@@ -576,7 +615,7 @@ function NumberBlock({
   return (
     <View style={styles.numberBlock}>
       <NumberLine number={detail.number} />
-      <TestCall detail={detail}>
+      <TestCall detail={detail} onUpgrade={onUpgrade}>
         <Button
           label="Unlink this number"
           size="pill"
@@ -589,6 +628,23 @@ function NumberBlock({
   );
 }
 
+/** Seconds both "Call" buttons stay off after a placed test call: one tap, one call. */
+const TEST_CALL_COOLDOWN_SECONDS = 30;
+
+/**
+ * 429 `test_call_limit` with `upgrade`: an account with no plan used its free
+ * test calls for today. The message says "Pick a plan for more", so the alert
+ * offers the way there. True when it showed the alert.
+ */
+function offerPlansFor(err: unknown, onUpgrade: () => void): boolean {
+  if (!(err instanceof ApiError) || err.code !== 'test_call_limit' || !err.upgrade) return false;
+  Alert.alert('Test call limit reached', err.message, [
+    { text: 'Not now', style: 'cancel' },
+    { text: 'See plans', onPress: onUpgrade },
+  ]);
+  return true;
+}
+
 /**
  * "Have it call me", with or without a number: without one the server rings
  * from its demo line. One tap when there is a number to ring - the first
@@ -596,11 +652,25 @@ function NumberBlock({
  * `children` joins "Use another number" in the row of small actions, so the
  * block does not stack one text button under another.
  */
-function TestCall({ detail, children }: { detail: AssistantDetail; children?: ReactNode }) {
+function TestCall({
+  detail,
+  onUpgrade,
+  children,
+}: {
+  detail: AssistantDetail;
+  onUpgrade: () => void;
+  children?: ReactNode;
+}) {
   const [last, setLast] = useState<string | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [state, setState] = useState<{ ok: boolean; message: string } | null>(null);
+  // A ref, not `busy`: two taps in one tick both read the stale state.
+  const inFlight = useRef(false);
+  // A placed call holds both "Call" buttons, so a second tap cannot ring a
+  // second call at once. The same countdown as sign-in's "Send a new code".
+  const [coolUntil, setCoolUntil] = useState(0);
+  const [coolLeft, setCoolLeft] = useState(0);
 
   useEffect(() => {
     let alive = true;
@@ -616,25 +686,56 @@ function TestCall({ detail, children }: { detail: AssistantDetail; children?: Re
     };
   }, []);
 
+  useEffect(() => {
+    if (!coolUntil) return;
+    let id: ReturnType<typeof setInterval> | undefined;
+    const tick = () => {
+      const left = secondsLeft(coolUntil);
+      setCoolLeft(left);
+      if (left === 0) clearInterval(id);
+    };
+    id = setInterval(tick, 1000);
+    // iOS pauses JS timers in the background: catch up on return.
+    const sub = AppState.addEventListener('change', (s) => {
+      if (s === 'active') tick();
+    });
+    return () => {
+      clearInterval(id);
+      sub.remove();
+    };
+  }, [coolUntil]);
+
   const remember = useCallback((to: string) => {
     setLast(to);
     void SecureStore.setItemAsync(LAST_TEST_NUMBER_KEY, to).catch(() => {});
   }, []);
 
+  function placed(to: string) {
+    remember(to);
+    setCoolLeft(TEST_CALL_COOLDOWN_SECONDS);
+    setCoolUntil(Date.now() + TEST_CALL_COOLDOWN_SECONDS * 1000);
+  }
+
   const target = detail.escalation.targets[0]?.number || last || '';
 
   async function callTarget() {
+    if (inFlight.current || coolLeft > 0) return;
+    inFlight.current = true;
     setBusy(true);
     setState(null);
     try {
       await api.testCall(detail.id, target);
-      remember(target);
+      placed(target);
       setState({ ok: true, message: 'Calling you now.' });
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (err) {
+      // The server's words stay under the button: the limit, the country
+      // rule or a number it cannot dial.
       setState({ ok: false, message: (err as Error).message });
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      offerPlansFor(err, onUpgrade);
     } finally {
+      inFlight.current = false;
       setBusy(false);
     }
   }
@@ -643,7 +744,9 @@ function TestCall({ detail, children }: { detail: AssistantDetail; children?: Re
     <TestCallSheet
       visible={sheetOpen}
       assistantId={detail.id}
-      onPlaced={remember}
+      coolLeft={coolLeft}
+      onPlaced={placed}
+      onUpgrade={onUpgrade}
       onClose={() => setSheetOpen(false)}
     />
   );
@@ -666,11 +769,12 @@ function TestCall({ detail, children }: { detail: AssistantDetail; children?: Re
     <View style={styles.testCall}>
       <Text style={styles.testLabel}>Have it call me</Text>
       <Button
-        label={`Call ${formatPhone(target)}`}
+        label={coolLeft > 0 ? `Call again in ${coolLeft} s` : `Call ${formatPhone(target)}`}
         variant="secondary"
         icon="call-outline"
         onPress={callTarget}
         busy={busy}
+        disabled={coolLeft > 0}
         accessibilityHint="The receptionist rings this number and answers as it would a caller."
       />
       {state ? (
@@ -704,34 +808,69 @@ function TestCall({ detail, children }: { detail: AssistantDetail; children?: Re
 function TestCallSheet({
   visible,
   assistantId,
+  coolLeft,
   onPlaced,
+  onUpgrade,
   onClose,
 }: {
   visible: boolean;
   assistantId: string;
+  /** Seconds until another test call may go out; 0 when it may. */
+  coolLeft: number;
   onPlaced: (to: string) => void;
+  onUpgrade: () => void;
   onClose: () => void;
 }) {
   const [to, setTo] = useState('');
   const [busy, setBusy] = useState(false);
   const [state, setState] = useState<{ ok: boolean; message: string } | null>(null);
+  // The server's word on this number (a country we do not serve, a number it
+  // cannot dial) belongs under the field, and goes once the number changes.
+  const [refused, setRefused] = useState<{ to: string; message: string } | null>(null);
+  const inFlight = useRef(false);
 
-  useEffect(() => {
-    if (visible) setState(null);
-  }, [visible]);
+  const [shownVisible, setShownVisible] = useState(visible);
+  if (shownVisible !== visible) {
+    setShownVisible(visible);
+    if (visible) {
+      setState(null);
+      setRefused(null);
+    }
+  }
+
+  const valid = isValidPhone(to);
+  const fieldError =
+    to.trim().length > 0 && !valid
+      ? 'Enter the full number with the country code, like +1 415 555 0132.'
+      : refused && refused.to === to
+        ? refused.message
+        : undefined;
 
   async function place() {
+    if (!valid || coolLeft > 0 || inFlight.current) return;
     const number = dialable(to.trim());
+    inFlight.current = true;
     setBusy(true);
     setState(null);
+    setRefused(null);
     try {
       await api.testCall(assistantId, number);
       onPlaced(number);
       setState({ ok: true, message: 'Calling you now.' });
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (err) {
-      setState({ ok: false, message: (err as Error).message });
+      const code = err instanceof ApiError ? err.code : undefined;
+      if (code === 'test_call_country' || code === 'invalid_phone') {
+        setRefused({ to, message: (err as Error).message });
+      } else if (offerPlansFor(err, onUpgrade)) {
+        // Close now, so "See plans" opens the paywall over the editor, not
+        // under this sheet. The alert has its own window and stays up.
+        onClose();
+      } else {
+        setState({ ok: false, message: (err as Error).message });
+      }
     } finally {
+      inFlight.current = false;
       setBusy(false);
     }
   }
@@ -745,9 +884,9 @@ function TestCallSheet({
         <SaveBar
           onSave={place}
           busy={busy}
-          dirty={to.trim().length > 0}
+          dirty={valid && coolLeft === 0}
           state={state}
-          label="Call me"
+          label={coolLeft > 0 ? `Call again in ${coolLeft} s` : 'Call me'}
         />
       }
     >
@@ -760,6 +899,7 @@ function TestCallSheet({
         autoCapitalize="none"
         autoComplete="tel"
         textContentType="telephoneNumber"
+        error={fieldError}
         hint="Include the country code. The receptionist rings you and answers as it would a caller."
       />
     </Sheet>
@@ -786,9 +926,11 @@ function useSheetSave(
   // agent-sync warning on screen: a successful-with-warning save refreshes
   // `detail`, and an effect keyed on that would wipe the message in the same
   // render that set it.
-  useEffect(() => {
+  const [shownVisible, setShownVisible] = useState(visible);
+  if (shownVisible !== visible) {
+    setShownVisible(visible);
     if (visible) setState(null);
-  }, [visible]);
+  }
 
   const submit = useCallback(
     async (patch: AssistantPatch) => {
@@ -972,9 +1114,18 @@ function voiceTags(v: VoiceOption): string[] {
   if (v.gender === 'm') tags.push('Male');
   for (const part of v.description.split('·')) {
     const tag = part.trim();
-    if (tag) tags.push(tag.charAt(0).toUpperCase() + tag.slice(1));
+    const label = tag.charAt(0).toUpperCase() + tag.slice(1);
+    if (tag && !tags.includes(label)) tags.push(label);
   }
   return tags;
+}
+
+/**
+ * A library voice is listed as "lib:<owner>:<voice id>:<name>". Once saved,
+ * the assistant holds the plain voice id, so match on that part too.
+ */
+function sameVoice(pick: string, id: string): boolean {
+  return pick === id || (pick.startsWith('lib:') && pick.split(':')[2] === id);
 }
 
 function VoiceRow({
@@ -1065,9 +1216,11 @@ function VoiceSheet({
 
   // A sample must not keep talking over the screen behind a closed sheet -
   // whether it closed by Save, by X, or by the Android back gesture.
-  useEffect(() => {
+  const [shownVisible, setShownVisible] = useState(visible);
+  if (shownVisible !== visible) {
+    setShownVisible(visible);
     if (!visible) setPreview(null);
-  }, [visible]);
+  }
 
   const dirty =
     voiceId !== detail.voiceId ||
@@ -1079,7 +1232,7 @@ function VoiceSheet({
   const voices = catalog?.voices ?? [];
   // A voice picked on the web from the full library is not in this catalog.
   // It stays choosable, so a look through the list is not a silent swap.
-  const custom = Boolean(detail.voiceId) && catalog !== null && !voices.some((v) => v.voiceId === detail.voiceId);
+  const custom = Boolean(detail.voiceId) && catalog !== null && !voices.some((v) => sameVoice(v.voiceId, detail.voiceId));
 
   const languageOptions = useMemo(
     () =>
@@ -1146,10 +1299,10 @@ function VoiceSheet({
                 key={v.voiceId}
                 name={v.name}
                 tags={voiceTags(v)}
-                selected={voiceId === v.voiceId}
+                selected={sameVoice(v.voiceId, voiceId)}
                 playing={talking && preview === v.previewUrl}
                 canPlay={Boolean(v.previewUrl)}
-                onSelect={() => setVoiceId(v.voiceId)}
+                onSelect={() => setVoiceId(sameVoice(v.voiceId, detail.voiceId) ? detail.voiceId : v.voiceId)}
                 onTogglePlay={() =>
                   setPreview((cur) => (cur === v.previewUrl ? null : (v.previewUrl ?? null)))
                 }
@@ -1180,7 +1333,7 @@ function VoiceSheet({
         onChange={(v) => setTier(v as 'fast' | 'natural')}
       />
       <Text style={styles.sheetHint}>
-        Natural sounds better and replies a little slower. Fast is the default.
+        Natural sounds better and replies a little slower. New receptionists start on Natural.
       </Text>
       <View style={{ height: spacing.lg }} />
       <StepPicker
@@ -1402,13 +1555,18 @@ function EscalationSheet({ visible, detail, onClose, onSave }: SheetProps) {
         </View>
       ))}
 
-      <Button
-        label="Add another"
-        icon="add"
-        variant="secondary"
-        onPress={addTarget}
-        style={{ marginBottom: spacing.lg }}
-      />
+      {/* The server keeps only the first 5 destinations and drops the rest on save. */}
+      {targets.length < 5 ? (
+        <Button
+          label="Add another"
+          icon="add"
+          variant="secondary"
+          onPress={addTarget}
+          style={{ marginBottom: spacing.lg }}
+        />
+      ) : (
+        <Text style={[styles.sheetHint, { marginBottom: spacing.lg }]}>Up to 5 destinations.</Text>
+      )}
 
       <TextField
         label="Always escalate when"
@@ -1462,6 +1620,9 @@ function HoursSheet({ visible, detail, onClose, onSave }: SheetProps) {
     // behind an off switch is not an unsaved edit.
     (on && JSON.stringify(days) !== JSON.stringify(stored?.days ?? []));
   const noDay = on && days.every((d) => !d);
+  // The server reads start == end as closed, and a week with no open day as no
+  // limit at all, so a 09:00-09:00 day would let transfers through at any hour.
+  const sameTime = on && days.some((d) => d !== null && d.start === d.end);
 
   if (!primary) {
     return (
@@ -1517,7 +1678,7 @@ function HoursSheet({ visible, detail, onClose, onSave }: SheetProps) {
       visible={visible}
       title="When transfers are allowed"
       onClose={() => confirmClose(dirty)}
-      footer={<SaveBar onSave={() => submit(build())} busy={busy} dirty={canSave(dirty) && !noDay} state={state} />}
+      footer={<SaveBar onSave={() => submit(build())} busy={busy} dirty={canSave(dirty) && !noDay && !sameTime} state={state} />}
     >
       <SwitchRow
         title="Only transfer at certain hours"
@@ -1530,6 +1691,11 @@ function HoursSheet({ visible, detail, onClose, onSave }: SheetProps) {
           {noDay && (
             <Text style={[styles.sheetHint, { color: colors.errorText }]}>
               Pick at least one day, or turn this off to allow transfers at any time.
+            </Text>
+          )}
+          {sameTime && (
+            <Text style={[styles.sheetHint, { color: colors.errorText }]}>
+              {"Start and end can't be the same."}
             </Text>
           )}
           {DAYS.map((label, i) => {

@@ -15,7 +15,20 @@ export type PlanKey = 'solo' | 'team';
 export type StoreKind = 'ios' | 'android' | 'mock';
 
 /** Why purchases cannot run here. `null` means they can. */
-export type UnavailableReason = 'expo-go' | 'web' | 'no-key' | null;
+export type UnavailableReason = 'expo-go' | 'web' | 'no-key' | 'restricted' | null;
+
+/**
+ * The store is there but this device refuses in-app purchases: Screen Time or
+ * device management has turned them off (StoreKit `canMakePayments` is false).
+ * The iOS adapter's `init()` throws it; the provider then reports
+ * unavailableReason 'restricted' instead of a "try again" that cannot work.
+ */
+export class PurchasesRestrictedError extends Error {
+  constructor() {
+    super('In-app purchases are turned off on this device.');
+    this.name = 'PurchasesRestrictedError';
+  }
+}
 
 /**
  * One product the catalog names for this platform, before the store has been

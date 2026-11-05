@@ -49,6 +49,7 @@ import {
   callerLabel,
   callHeadline,
   dayLabel,
+  dayKey,
   formatPhone,
   outcomeLabel,
   sentimentLabel,
@@ -58,7 +59,7 @@ import {
   timeLabel,
 } from '@/lib/format';
 import { dial } from '@/lib/links';
-import type { CallActionItem, CallDetail, CallTurn } from '@/lib/types';
+import type { Booking, CalendarState, CallActionItem, CallDetail, CallTurn } from '@/lib/types';
 import { useQuery } from '@/lib/use-query';
 import { useTranslated } from '@/lib/use-translated';
 
@@ -89,6 +90,9 @@ export default function CallDetailScreen() {
   // simply closes leaves "did that go?" hanging.
   const [textSent, setTextSent] = useState<string | null>(null);
   const [showOriginal, setShowOriginal] = useState(false);
+  // The booking day shown in a sheet. A push to the Appointments tab from here
+  // would pop this call off the stack, so the day opens over the call instead.
+  const [openDay, setOpenDay] = useState<string | null>(null);
 
   // Bumped by the live poll below. A dependency rather than `refresh()`:
   // `refresh` is the pull-to-refresh, and binding the control to it would spin
@@ -396,7 +400,7 @@ export default function CallDetailScreen() {
             messageText={source.messageAt[i] >= 0 ? shown[source.messageAt[i]] : undefined}
             dimmed={dim !== null}
             divided={i > 0}
-            onOpenDay={(day) => router.push({ pathname: '/calendar', params: { day } })}
+            onOpenDay={setOpenDay}
           />
         ))
       )}
@@ -510,6 +514,18 @@ export default function CallDetailScreen() {
           setReported(true);
         }}
       />
+
+      {openDay ? (
+        <DaySheet
+          day={openDay}
+          callId={data.id}
+          onClose={() => setOpenDay(null)}
+          onOpenCalendar={() => {
+            setOpenDay(null);
+            router.push({ pathname: '/calendar', params: { day: openDay } });
+          }}
+        />
+      ) : null}
     </View>
   );
 }
@@ -759,6 +775,19 @@ function bookingDay(startIso: string): string {
   return `${start.getUTCFullYear()}-${pad(start.getUTCMonth() + 1)}-${pad(start.getUTCDate())}`;
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Whether the day sheet's data covers the day: GET /api/mobile/calendar sends
+ * bookings and events from 7 days back to 60 days ahead (web
+ * app/api/mobile/calendar/route.ts). Outside that range the sheet would say
+ * "No appointments on this day." even for this call's own booking.
+ */
+function calendarCovers(day: string, now: number): boolean {
+  const start = Date.parse(`${day}T00:00:00Z`);
+  return Number.isFinite(start) && start + DAY_MS > now - 7 * DAY_MS && start < now + 60 * DAY_MS;
+}
+
 function ActionRow({
   action,
   messageText,
@@ -777,6 +806,8 @@ function ActionRow({
   const label = actionTypeLabel(action.type);
   const status = actionStatus(action.status);
   const p = action.payload;
+  // Read once on mount: it only decides whether "See that day" is offered.
+  const [openedAt] = useState(() => Date.now());
 
   const head = (
     <View style={styles.actionHead}>
@@ -813,19 +844,21 @@ function ActionRow({
         {failure}
       </>
     );
-    if (!day) return <View style={[styles.actionRow, divided && styles.divided]}>{body}</View>;
+    if (!day || !calendarCovers(day, openedAt)) {
+      return <View style={[styles.actionRow, divided && styles.divided]}>{body}</View>;
+    }
     return (
       <Pressable
         onPress={() => onOpenDay(day)}
         accessibilityRole="button"
         accessibilityLabel={[label, status.label, title, when].filter(Boolean).join(', ')}
-        accessibilityHint="Opens your calendar on that day"
+        accessibilityHint="Shows your appointments that day"
         android_ripple={ripple}
         style={({ pressed: down }) => [styles.actionRow, divided && styles.divided, down && pressed]}
       >
         {body}
         <View style={styles.openDay}>
-          <Text style={styles.openDayText}>Open in calendar</Text>
+          <Text style={styles.openDayText}>See that day</Text>
           <Icon name="chevron-forward" size={ICON.chevron} color={colors.ink} />
         </View>
       </Pressable>
@@ -901,6 +934,116 @@ const TEMPLATES = [
   'Hi, we got your message and are looking into it now.',
 ] as const;
 
+type DayItem = { key: string; when: string; title: string; meta: string; allDay: boolean; start: number };
+
+/** The Appointments tab's status badges (STATUS_BADGE in app/(tabs)/calendar.tsx). */
+const STATUS_LABEL: Partial<Record<Booking['status'], string>> = {
+  pending: 'Pending',
+  failed: "Didn't sync",
+  cancelled: 'Cancelled',
+};
+
+/** One day of the Appointments tab: its bookings and calendar events, in order. */
+function dayItems(state: CalendarState, day: string, callId: string): DayItem[] {
+  const tz = state.timezone;
+  const items: DayItem[] = [];
+  for (const b of state.bookings) {
+    if (dayKey(b.startTime, tz) !== day) continue;
+    const meta = [
+      b.attendeeName,
+      b.attendeePhone ? formatPhone(b.attendeePhone) : null,
+      b.cancellation ? STATUS_LABEL.cancelled : STATUS_LABEL[b.status],
+      b.callId === callId ? 'This call' : null,
+    ].filter(Boolean);
+    items.push({
+      key: `b:${b.id}`,
+      when: `${timeLabel(b.startTime, tz)} - ${timeLabel(b.endTime, tz)}`,
+      title: b.title || 'Appointment',
+      meta: meta.join(' · '),
+      allDay: false,
+      start: Date.parse(b.startTime),
+    });
+  }
+  // A booking is also an event in the owner's calendar. Hide that echo, as the
+  // Appointments tab does (app/(tabs)/calendar.tsx): by the stored provider
+  // event id, or for a pending booking with none yet, by provider and start instant.
+  const booked = new Set(state.bookings.map((b) => b.externalId).filter((v): v is string => Boolean(v)));
+  const pendingAt = new Set(
+    state.bookings
+      .filter((b) => b.status === 'pending' && !b.externalId && b.provider && Number.isFinite(Date.parse(b.startTime)))
+      .map((b) => `${b.provider}|${Date.parse(b.startTime)}`),
+  );
+  for (const e of state.events) {
+    if (booked.has(e.id.slice(e.integrationId.length + 1))) continue;
+    if (!e.allDay && pendingAt.has(`${e.provider}|${Date.parse(e.start)}`)) continue;
+    // An all-day event has bare dates, not moments in the owner's zone. Its end
+    // date is exclusive, so it covers each day from its start date up to the end date.
+    const first = e.start.slice(0, 10);
+    const onDay = e.allDay
+      ? first === day || (first < day && day < e.end.slice(0, 10))
+      : dayKey(e.start, tz) === day;
+    if (!onDay) continue;
+    items.push({
+      key: `e:${e.id}`,
+      when: e.allDay ? 'All day' : `${timeLabel(e.start, tz)} - ${timeLabel(e.end, tz)}`,
+      title: e.title || 'Busy',
+      meta: e.providerLabel,
+      allDay: e.allDay,
+      start: Date.parse(e.start),
+    });
+  }
+  return items.sort((a, b) => Number(b.allDay) - Number(a.allDay) || a.start - b.start);
+}
+
+function DaySheet({
+  day,
+  callId,
+  onClose,
+  onOpenCalendar,
+}: {
+  day: string;
+  callId: string;
+  onClose: () => void;
+  onOpenCalendar: () => void;
+}) {
+  const { data, error, loading, refresh } = useQuery(() => api.calendar(), []);
+  const items = data ? dayItems(data, day, callId) : [];
+  // The day key is a calendar date, so read it as UTC to keep the same date.
+  const title = new Date(`${day}T00:00:00Z`).toLocaleDateString('en-GB', {
+    timeZone: 'UTC',
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+  });
+
+  return (
+    <Sheet visible title={title} onClose={onClose}>
+      {!data && loading ? (
+        <SkeletonCard lines={3} />
+      ) : !data ? (
+        <ErrorState message={error ?? 'Could not load your appointments.'} onRetry={refresh} />
+      ) : items.length === 0 ? (
+        <Text style={styles.placeholder}>No appointments on this day.</Text>
+      ) : (
+        items.map((item, i) => (
+          <View key={item.key} style={[styles.actionRow, i > 0 && styles.divided]}>
+            <Text style={styles.actionWhen}>{item.when}</Text>
+            <Text style={styles.actionTitle}>{item.title}</Text>
+            {item.meta ? <Text style={styles.actionMeta}>{item.meta}</Text> : null}
+          </View>
+        ))
+      )}
+      <Button
+        label="Open in Appointments"
+        variant="secondary"
+        icon="calendar-outline"
+        onPress={onOpenCalendar}
+        style={styles.reviewButton}
+      />
+    </Sheet>
+  );
+}
+
 function TextBackSheet({
   visible,
   callId,
@@ -919,11 +1062,19 @@ function TextBackSheet({
   const [busy, setBusy] = useState(false);
   const [state, setState] = useState<{ ok: boolean; message: string } | null>(null);
 
-  useEffect(() => {
+  const [shownVisible, setShownVisible] = useState(visible);
+  if (shownVisible !== visible) {
+    setShownVisible(visible);
     if (visible) setState(null);
-  }, [visible]);
+  }
+
+  // Two taps in one frame both run send() before `busy` re-renders the
+  // button, and each would text the caller. The ref stops the second at once.
+  const sending = useRef(false);
 
   async function send() {
+    if (sending.current) return;
+    sending.current = true;
     setBusy(true);
     setState(null);
     const text = message.trim();
@@ -935,6 +1086,7 @@ function TextBackSheet({
     } catch (err) {
       setState({ ok: false, message: (err as Error).message });
     } finally {
+      sending.current = false;
       setBusy(false);
     }
   }
@@ -1026,9 +1178,11 @@ function ReportSheet({
   const [busy, setBusy] = useState(false);
   const [state, setState] = useState<{ ok: boolean; message: string } | null>(null);
 
-  useEffect(() => {
+  const [shownVisible, setShownVisible] = useState(visible);
+  if (shownVisible !== visible) {
+    setShownVisible(visible);
     if (visible) setState(null);
-  }, [visible]);
+  }
 
   // Two taps in one frame both run send() before `busy` re-renders the
   // button, and each would post a report. The ref stops the second at once.

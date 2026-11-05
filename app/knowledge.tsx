@@ -652,10 +652,12 @@ function TeachSheet({
   // A reopened sheet must not show the previous attempt's result, but it must
   // still explain a request that is still running - otherwise Add is a disabled
   // spinner with no caption until the old request settles.
-  useEffect(() => {
+  // Done during render, so the old result never shows for a frame on reopen.
+  const [shownVisible, setShownVisible] = useState(visible);
+  if (shownVisible !== visible) {
+    setShownVisible(visible);
     if (visible) setState(busy ? { ok: true, message: 'Still reading that page...' } : null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- `busy` is read, not tracked
-  }, [visible]);
+  }
 
   const trimmedUrl = url.trim();
   const urlOk = URL_SHAPE.test(trimmedUrl);
@@ -783,10 +785,10 @@ function NotesSheet({
   // this off the props instead would let the foreground revalidate behind the
   // open sheet overwrite whatever the user is in the middle of typing.
   const wasOpen = useRef(false);
-  const seeded = useRef({ notes, verified });
+  const [seeded, setSeeded] = useState({ notes, verified });
   useEffect(() => {
     if (visible && !wasOpen.current) {
-      seeded.current = { notes, verified };
+      setSeeded({ notes, verified });
       setDraftNotes(notes);
       setDraftVerified(verified);
       setState(null);
@@ -799,7 +801,7 @@ function NotesSheet({
   // keyboard, and comparing to those would enable Save on a draft nobody edited
   // and prompt to discard changes that were never made.
   const dirty =
-    draftNotes !== seeded.current.notes || draftVerified !== seeded.current.verified;
+    draftNotes !== seeded.notes || draftVerified !== seeded.verified;
 
   // Lines the server would drop on save without a word (lib/verified-answers.ts).
   // Save stays off until they are fixed, so nothing typed is lost silently.

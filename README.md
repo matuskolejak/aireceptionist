@@ -4,7 +4,7 @@ The phone-shaped half of [AI Receptionist Now](https://aireceptionistnow.com). I
 answers one question the web dashboard cannot answer well from a pocket: *is my
 receptionist working right now, and what did it just do?*
 
-Expo (SDK 54) + expo-router, structured after the `mobileapp` project in this
+Expo (SDK 58) + expo-router, structured after the `mobileapp` project in this
 same folder, but pointed at this product's data and palette.
 
 ---

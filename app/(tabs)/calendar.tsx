@@ -18,6 +18,7 @@ import {
   SkeletonCard,
   StaleNotice,
   TextLink,
+  useLargeText,
   useLineLimit,
   type BadgeTone,
 } from '@/components/ui';
@@ -49,6 +50,9 @@ import { useQuery } from '@/lib/use-query';
  */
 export default function AppointmentsScreen() {
   const router = useRouter();
+  // At the accessibility sizes the wrapped subtitle made the fixed header a third of the
+  // screen, so it moves into the list header and scrolls away with the agenda.
+  const largeText = useLargeText();
   const { day } = useLocalSearchParams<{ day?: string }>();
   const { data, error, loading, refreshing, refresh } = useQuery(
     () => api.calendar(deviceTimeZone()),
@@ -187,9 +191,12 @@ export default function AppointmentsScreen() {
     );
   }
 
+  // Calendars whose events did not load: the free time shown may not be free.
+  const unavailable = data.eventsUnavailable ?? [];
+
   return (
     <>
-      <Screen title="Appointments" subtitle={subtitle} scroll={false} right={headerButton}>
+      <Screen title="Appointments" subtitle={largeText ? undefined : subtitle} scroll={false} right={headerButton}>
         <SectionList<Item, AgendaSection>
           ref={listRef}
           sections={sections}
@@ -199,7 +206,32 @@ export default function AppointmentsScreen() {
           stickySectionHeadersEnabled={false}
           onScrollToIndexFailed={onScrollToIndexFailed}
           contentContainerStyle={sections.length === 0 ? styles.emptyWrap : styles.list}
-          ListHeaderComponent={error ? <StaleNotice message={error} onRetry={refresh} /> : undefined}
+          ListHeaderComponent={
+            (largeText && subtitle) || error || unavailable.length > 0 ? (
+              <>
+                {largeText && subtitle ? <Text style={styles.listSubtitle}>{subtitle}</Text> : null}
+                {error ? <StaleNotice message={error} onRetry={refresh} /> : null}
+                {unavailable.length > 0 ? (
+                  <Notice
+                    tone="warning"
+                    style={styles.unavailable}
+                    action={
+                      <Button
+                        label="Check connections"
+                        icon="calendar-outline"
+                        size="pill"
+                        variant="secondary"
+                        accessibilityHint="Opens your connected calendars"
+                        onPress={() => router.push('/calendar/connections')}
+                      />
+                    }
+                  >
+                    {`Could not load ${unavailable.join(' and ')}. Times shown may not be complete.`}
+                  </Notice>
+                ) : null}
+              </>
+            ) : undefined
+          }
           refreshControl={
             <RefreshControl
               refreshing={refreshing}
@@ -296,7 +328,19 @@ function buildSections(bookings: Booking[], events: ExternalEvent[], tz: string)
   // of it. Matching on the stored provider event id keeps one card per
   // appointment - the Booking one, which is the only one with actions.
   const booked = new Set(bookings.map((b) => b.externalId).filter((v): v is string => Boolean(v)));
-  const ownEvents = events.filter((e) => !booked.has(e.id.slice(e.integrationId.length + 1)));
+  // A create that timed out after the provider saved the event leaves the booking
+  // pending with no externalId, next to its own echo. Match those on provider and
+  // start instant instead (a Booking carries no integrationId).
+  const pendingAt = new Set(
+    bookings
+      .filter((b) => b.status === 'pending' && !b.externalId && b.provider && Number.isFinite(Date.parse(b.startTime)))
+      .map((b) => `${b.provider}|${Date.parse(b.startTime)}`),
+  );
+  const ownEvents = events.filter(
+    (e) =>
+      !booked.has(e.id.slice(e.integrationId.length + 1)) &&
+      !(!e.allDay && pendingAt.has(`${e.provider}|${Date.parse(e.start)}`)),
+  );
 
   const requests = bookings
     .filter(isUndated)
@@ -325,12 +369,18 @@ function buildSections(bookings: Booking[], events: ExternalEvent[], tz: string)
    * York owner would see today's holiday as yesterday's). Their day is the
    * date prefix; everything else is the owner-local day of the start.
    */
-  const keyOf = (i: Agenda) =>
-    i.kind === 'event' && i.event.allDay ? i.event.start.slice(0, 10) : dayKey(new Date(i.at).toISOString(), tz);
+  const keyOf = (i: Agenda) => {
+    if (i.kind !== 'event' || !i.event.allDay) return dayKey(new Date(i.at).toISOString(), tz);
+    // A multi-day block that began before today and is still on files under today.
+    const start = i.event.start.slice(0, 10);
+    return start < today && i.event.end.slice(0, 10) > today ? today : start;
+  };
   const isAllDay = (i: Agenda) => i.kind === 'event' && i.event.allDay;
   const isPast = (i: Agenda) => {
     if (i.kind === 'booking') return bookingEnded(i.booking, now);
-    if (i.event.allDay) return i.event.start.slice(0, 10) < today;
+    // The end date is exclusive (the next day at 00:00Z), so the event is past
+    // once that date is today or earlier.
+    if (i.event.allDay) return i.event.start.slice(0, 10) < today && i.event.end.slice(0, 10) <= today;
     const end = Date.parse(i.event.end);
     return (Number.isFinite(end) ? end : i.at) <= now;
   };
@@ -625,6 +675,9 @@ function BookingCard({
       AccessibilityInfo.announceForAccessibility('Synced to your calendar.');
     } catch (err) {
       setRetryError((err as Error).message || "Still couldn't reach your calendar. Try again in a moment.");
+      // A 404 or 409 is final (row gone or changed, slot taken, no calendar),
+      // and the message says what to do instead. Reload so the card is current.
+      if (err instanceof ApiError && (err.status === 404 || err.status === 409)) void onRefresh();
     } finally {
       setBusy(false);
     }
@@ -732,13 +785,17 @@ function CancelSheet({
   const [done, setDone] = useState(false);
   const [state, setState] = useState<{ ok: boolean; message: string } | null>(null);
 
-  useEffect(() => {
-    if (!booking) return;
-    setReason('');
-    setRebook(true);
-    setState(null);
-    setDone(false);
-  }, [booking]);
+  // Reset for each new booking, during render, so the last one's text never shows for a frame.
+  const [shownBooking, setShownBooking] = useState(booking);
+  if (shownBooking !== booking) {
+    setShownBooking(booking);
+    if (booking) {
+      setReason('');
+      setRebook(true);
+      setState(null);
+      setDone(false);
+    }
+  }
 
   async function submit() {
     if (!booking) return;
@@ -844,6 +901,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   emptyAction: { marginTop: spacing.lg },
+  unavailable: { marginHorizontal: spacing.lg, marginBottom: spacing.md },
+  // The Screen subtitle, moved into the list at the accessibility sizes. Same type and inset.
+  listSubtitle: { ...type.caption, paddingHorizontal: spacing.lg, paddingBottom: spacing.sm },
   skeletons: { paddingHorizontal: spacing.lg, gap: spacing.md },
   sectionHead: {
     paddingHorizontal: spacing.lg,

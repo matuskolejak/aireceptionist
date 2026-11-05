@@ -96,7 +96,10 @@ export function useTranslated(
   // The effect keys on the content hash, not the array: a refetch hands over
   // a new array with the same words, and that must not re-run anything.
   const textsRef = useRef(texts);
-  textsRef.current = texts;
+  // Declared before the request effect below, so it runs first in each commit.
+  useEffect(() => {
+    textsRef.current = texts;
+  }, [texts]);
 
   const [ready, setReady] = useState<{
     key: string;

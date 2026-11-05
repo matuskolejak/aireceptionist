@@ -37,9 +37,13 @@ function shortDate(iso: string): string | null {
   return formatDay(ms);
 }
 
-/** 'Renews 14 Oct 2026' / 'Ends 14 Oct 2026', or null when the store gave no date. */
+/**
+ * 'Renews 14 Oct 2026' / 'Ends 14 Oct 2026', or null when the store gave no
+ * date. Null for past_due too: the store is retrying a failed renewal, and the
+ * date is the period that already ended.
+ */
 function periodLine(billing: BillingSnapshot | null): string | null {
-  if (!billing?.currentPeriodEnd) return null;
+  if (!billing?.currentPeriodEnd || billing.status === 'past_due') return null;
   const date = shortDate(billing.currentPeriodEnd);
   if (!date) return null;
   return billing.cancelAtPeriodEnd ? `Ends ${date}` : `Renews ${date}`;

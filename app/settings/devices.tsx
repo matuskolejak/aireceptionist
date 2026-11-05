@@ -10,6 +10,7 @@ import {
   EmptyState,
   ErrorState,
   ICON,
+  ListRow,
   SkeletonRows,
   StaleNotice,
   useLargeText,
@@ -22,6 +23,9 @@ import { relTimeOf } from '@/lib/format';
 import type { AccountDevice } from '@/lib/types';
 import { useQuery } from '@/lib/use-query';
 
+/** The busy key of "Sign out everywhere else". Device ids are 8-64 characters, so it cannot clash. */
+const OTHERS = 'others';
+
 /**
  * Where this account is signed in.
  *
@@ -31,10 +35,11 @@ import { useQuery } from '@/lib/use-query';
  * on sign-in; this lists them.
  *
  * Removing a row stops call alerts to that device (the server drops its push
- * registration) but does NOT sign it out: the refresh token lives in that
- * device's keychain and only GoTrue can invalidate it. The copy says exactly
- * that - promising a remote sign-out this cannot deliver would be worse than
- * not offering it. The phone in your hand offers a real Sign out instead.
+ * registration) but does NOT sign it out: it registers again the next time it
+ * opens the app, and the copy says so. Ending other sessions is "Sign out
+ * everywhere else": GoTrue revokes every session but this one, then the server
+ * forgets those installs (signOutOthers in context/AuthContext.tsx). The phone
+ * in your hand signs out of itself only.
  */
 export default function DevicesScreen() {
   const oneLine = useLineLimit(1);
@@ -42,7 +47,7 @@ export default function DevicesScreen() {
   // it, the name broke inside a word ("Simul / ator").
   const stacked = useLargeText();
   const insets = useSafeAreaInsets();
-  const { signOut } = useAuth();
+  const { signOut, signOutOthers } = useAuth();
   const { data, error, loading, refresh } = useQuery<{ devices: AccountDevice[] }>(
     () => api.devices(),
     [],
@@ -53,7 +58,7 @@ export default function DevicesScreen() {
     const name = device.model || 'this device';
     Alert.alert(
       `Remove ${name}?`,
-      'It stops call alerts to that device. It stays signed in until someone signs out on it.',
+      'It stops call alerts until that device opens the app again. To sign it out, use Sign out everywhere else.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -92,6 +97,38 @@ export default function DevicesScreen() {
         },
       },
     ]);
+  }
+
+  function confirmSignOutOthers() {
+    Alert.alert(
+      'Sign out everywhere else?',
+      'Your other phones and the website will need to sign in again. This phone stays signed in.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Sign out others',
+          style: 'destructive',
+          onPress: async () => {
+            setBusy(OTHERS);
+            try {
+              // Bounded inside AuthContext: never hangs, online or not.
+              const failed = await signOutOthers();
+              if (failed) {
+                Alert.alert('Could not sign out other devices', failed);
+                return;
+              }
+              await refresh();
+              Alert.alert(
+                'Signed out everywhere else',
+                'Your other phones and the website need to sign in again.',
+              );
+            } finally {
+              setBusy(null);
+            }
+          },
+        },
+      ],
+    );
   }
 
   if (loading) {
@@ -189,6 +226,21 @@ export default function DevicesScreen() {
           })}
         </Card>
       )}
+
+      <Card style={[styles.card, styles.othersCard]} padded={false}>
+        <ListRow
+          icon="log-out-outline"
+          label="Sign out everywhere else"
+          destructive
+          trailing="none"
+          busy={busy === OTHERS}
+          disabled={busy !== null}
+          onPress={confirmSignOutOthers}
+        />
+      </Card>
+      <Text style={styles.footnote}>
+        Signs out your other phones and the website. This phone stays signed in.
+      </Text>
     </ScrollView>
   );
 }
@@ -205,6 +257,8 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
   },
   card: { paddingHorizontal: spacing.lg },
+  othersCard: { marginTop: spacing.lg },
+  footnote: { ...type.caption, marginTop: spacing.sm, paddingHorizontal: spacing.lg },
   row: {
     flexDirection: 'row',
     alignItems: 'center',

@@ -5,12 +5,13 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type ReactNode,
 } from 'react';
-import { Alert, Platform } from 'react-native';
+import { Alert, AppState, Platform } from 'react-native';
 
 import { useAuth } from '@/context/AuthContext';
 import { api, ApiError } from '@/lib/api';
@@ -19,6 +20,7 @@ import {
   createAdapter,
   isLiveStripe,
   PLATFORM_PROVIDER,
+  PurchasesRestrictedError,
   STORE_NAME,
   unavailableReason,
   type PlanKey,
@@ -69,7 +71,11 @@ export interface RestoreResult {
 }
 
 export interface PurchasesValue {
-  /** False in Expo Go, on the web, or on an Android build without its RevenueCat key. */
+  /**
+   * False in Expo Go, on the web, on an Android build without its RevenueCat
+   * key, or on an iPhone where Screen Time or device management has turned
+   * in-app purchases off (unavailableReason 'restricted').
+   */
   available: boolean;
   unavailableReason: UnavailableReason;
   /** Products are priced. Never an endless "Loading price...": `loadError` is set within 15s otherwise. */
@@ -147,12 +153,14 @@ const STRIPE_ACTIVE_MESSAGE =
  * acceptance for that new purchase instead of a terms-less 'reconcile'.
  *
  * 'iap.reconcile.skip': transactions the server has already refused with a
- * terminal 409/400 during a silent reconcile, each with the refusal it
- * answered, so later launches do not re-POST them and a Restore that finds
- * only refused subscriptions can still say why. A 409 (bound to another
- * account) is kept as `${userId}:${originalTransactionId}`, since every renewal
- * shares it; a 400 (expired, refunded, unreadable) only as
- * `${userId}:tx:${transactionId}`, since it says nothing about the next renewal.
+ * terminal 409/400 during a silent reconcile or a Restore, each with the
+ * refusal it answered, so later launches do not re-POST them. A Restore tap
+ * never reads it: it asks the server again, and a new refusal replaces the
+ * entry. Once the server accepts a transaction, its entries are removed.
+ * A 409 (bound to another account) is kept as
+ * `${userId}:${originalTransactionId}`, since every renewal shares it; a 400
+ * (expired, refunded, unreadable) only as `${userId}:tx:${transactionId}`,
+ * since it says nothing about the next renewal.
  */
 const INTENT_KEY = 'iap.intent';
 const SKIP_KEY = 'iap.reconcile.skip';
@@ -253,13 +261,26 @@ async function readSkip(): Promise<SkipList> {
   }
 }
 
-async function addSkip(key: string, entry: SkipEntry): Promise<void> {
+/** `overwrite`: a refusal the server just gave on a Restore tap replaces the stored one. */
+async function addSkip(key: string, entry: SkipEntry, overwrite = false): Promise<void> {
   try {
     const list = await readSkip();
-    if (list[key]) return;
+    if (list[key] && !overwrite) return;
     await AsyncStorage.setItem(SKIP_KEY, JSON.stringify({ ...list, [key]: entry }));
   } catch {
     // One more silent request next launch.
+  }
+}
+
+/** The server accepted a transaction: refusals stored for its chain or for itself no longer hold. */
+async function removeSkip(keys: string[]): Promise<void> {
+  try {
+    const list = await readSkip();
+    if (!keys.some((key) => list[key])) return;
+    const next = Object.fromEntries(Object.entries(list).filter(([key]) => !keys.includes(key)));
+    await AsyncStorage.setItem(SKIP_KEY, JSON.stringify(next));
+  } catch {
+    // A stale entry only skips a silent reconcile; a Restore tap asks the server again.
   }
 }
 
@@ -378,7 +399,13 @@ export function PurchaseProvider({ children }: { children: ReactNode }) {
   const { userId } = useAuth();
 
   const adapter = useMemo(() => createAdapter(), []);
-  const reason = useMemo(() => (adapter ? null : unavailableReason()), [adapter]);
+  // iOS: Screen Time or device management has turned in-app purchases off.
+  // Set by load(); it lasts until a load succeeds (in practice, a relaunch).
+  const [restricted, setRestricted] = useState(false);
+  const reason = useMemo<UnavailableReason>(
+    () => (adapter ? (restricted ? 'restricted' : null) : unavailableReason()),
+    [adapter, restricted],
+  );
 
   const [products, setProducts] = useState<StoreProduct[]>([]);
   const [ready, setReady] = useState(false);
@@ -391,12 +418,15 @@ export function PurchaseProvider({ children }: { children: ReactNode }) {
   // Refs mirror the state the async flows read, so a listener registered once
   // sees the current session and billing rather than the ones at mount.
   const userIdRef = useRef<string | null>(userId);
-  userIdRef.current = userId;
+  // A layout effect, so it is current before any passive effect in the tree reads it.
+  useLayoutEffect(() => {
+    userIdRef.current = userId;
+  }, [userId]);
   const billingRef = useRef<BillingSnapshot | null>(null);
   const productsRef = useRef<StoreProduct[]>([]);
   const planNamesRef = useRef<Record<string, string>>({});
   const busyRef = useRef<'purchase' | 'restore' | null>(null);
-  /** Transactions waiting for a session or for the server: unfinished, retried on sign-in and on launch. */
+  /** Transactions waiting for a session or for the server: unfinished, retried on sign-in, on launch and on return to the app. */
   const queueRef = useRef<StoreTransaction[]>([]);
   /** Transaction ids being verified right now, so a re-delivery mid-verify is not processed twice. */
   const processingRef = useRef(new Set<string>());
@@ -442,10 +472,15 @@ export function PurchaseProvider({ children }: { children: ReactNode }) {
       productsRef.current = list;
       setProducts(list);
       setReady(true);
+      setRestricted(false);
       return { inited: true, priced: true };
     } catch (error) {
       if (__DEV__) console.log('[purchases] products failed:', error);
-      setLoadError(NO_PACKAGES_MESSAGE);
+      // No retry can price anything on a device that refuses purchases, so
+      // say why (PurchasesUnavailableNotice) instead of "Try again".
+      const blocked = error instanceof PurchasesRestrictedError;
+      setRestricted(blocked);
+      if (!blocked) setLoadError(NO_PACKAGES_MESSAGE);
       return { inited, priced: false };
     } finally {
       if (timer) clearTimeout(timer);
@@ -454,6 +489,7 @@ export function PurchaseProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!adapter) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- starts the store load; load() only clears loadError before its first await.
     loadRef.current = load();
   }, [adapter, load]);
 
@@ -532,13 +568,13 @@ export function PurchaseProvider({ children }: { children: ReactNode }) {
           }
         }
 
-        if (body.context === 'reconcile' || body.context === 'restore') {
+        // Only a silent reconcile trusts a stored refusal. A Restore tap asks
+        // the server again: the refusal may be stale (the web plan ended since).
+        if (body.context === 'reconcile') {
           const skip = opts.skip ?? (await readSkip());
           const refused = refusalFor(skip, uid, tx);
           if (refused) {
             // Refused before. Finished then too; finishing again is harmless.
-            // The stored refusal lets a Restore that finds nothing else say
-            // why, instead of 'No subscription found'.
             await safeFinish(tx);
             dequeue(tx);
             return { outcome: 'blocked', message: refused.message, terminal: refused };
@@ -564,6 +600,8 @@ export function PurchaseProvider({ children }: { children: ReactNode }) {
             if (opts.body || intentMatched) await clearIntent();
             dequeue(tx);
             setBilling(result.billing);
+            const keys = skipKeys(uid, tx);
+            await removeSkip([keys.chain, keys.tx]);
             if (opts.reason === 'purchase') {
               void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
             }
@@ -592,10 +630,15 @@ export function PurchaseProvider({ children }: { children: ReactNode }) {
               } else {
                 Alert.alert('Purchase failed', message);
               }
-            } else if (opts.reason === 'redelivery') {
+            } else if (opts.reason === 'redelivery' || opts.reason === 'restore') {
+              // A Restore tap just asked the server, so its answer replaces a stored one.
               const keys = skipKeys(uid, tx);
-              await addSkip(result.status === 409 ? keys.chain : keys.tx, { code: result.code, message });
-              if (__DEV__) console.log('[purchases] reconcile refused:', result.status, result.code, tx.productId);
+              await addSkip(
+                result.status === 409 ? keys.chain : keys.tx,
+                { code: result.code, message },
+                opts.reason === 'restore',
+              );
+              if (__DEV__) console.log('[purchases] verify refused:', opts.reason, result.status, result.code, tx.productId);
             }
             return { outcome: 'blocked', message, terminal: { code: result.code, message } };
           }
@@ -682,6 +725,7 @@ export function PurchaseProvider({ children }: { children: ReactNode }) {
     if (!adapter) return;
     if (!userId) {
       void adapter.reset().catch(() => {});
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- sign-out: clears billing together with the store adapter reset above.
       setBilling(null);
       return;
     }
@@ -704,6 +748,21 @@ export function PurchaseProvider({ children }: { children: ReactNode }) {
     };
   }, [adapter, userId, refreshBilling, drainQueue, reconcile, setBilling]);
 
+  // Coming back to the app retries what the queue holds (a transient or 401
+  // failure); otherwise it waits for the next launch or sign-in. Not during a
+  // purchase or restore: the store sheet closing also fires 'active'.
+  useEffect(() => {
+    if (!adapter || !userId) return;
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active' || busyRef.current !== null || queueRef.current.length === 0) return;
+      void (async () => {
+        await drainQueue();
+        await refreshBilling();
+      })();
+    });
+    return () => sub.remove();
+  }, [adapter, userId, drainQueue, refreshBilling]);
+
   const retryProducts = useCallback(async () => {
     if (!adapter) return;
     loadRef.current = load();
@@ -725,7 +784,6 @@ export function PurchaseProvider({ children }: { children: ReactNode }) {
     if (!userIdRef.current) return { restored: false };
     try {
       const owned = await adapter.restore();
-      const skip = await readSkip();
       let restored: BillingSnapshot | undefined;
       let firstTerminal: { code?: string; message: string } | null = null;
 
@@ -740,12 +798,12 @@ export function PurchaseProvider({ children }: { children: ReactNode }) {
           appAccountToken: null,
           raw: null,
         };
-        const result = await processTransaction(tx, { reason: 'restore', skip });
+        const result = await processTransaction(tx, { reason: 'restore' });
         if (result.outcome === 'purchased') restored = result.billing;
         else if (result.terminal) firstTerminal = result.terminal;
       } else {
         for (const tx of owned) {
-          const result = await processTransaction(tx, { reason: 'restore', skip });
+          const result = await processTransaction(tx, { reason: 'restore' });
           if (result.outcome === 'purchased') {
             restored = result.billing ?? restored;
           } else if (result.terminal && !firstTerminal) {
@@ -899,7 +957,7 @@ export function PurchaseProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<PurchasesValue>(
     () => ({
-      available: adapter !== null,
+      available: adapter !== null && !restricted,
       unavailableReason: reason,
       ready,
       loadError,
@@ -920,6 +978,7 @@ export function PurchaseProvider({ children }: { children: ReactNode }) {
     [
       adapter,
       reason,
+      restricted,
       ready,
       loadError,
       retryProducts,

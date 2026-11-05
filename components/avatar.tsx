@@ -5,6 +5,7 @@ import {
   Easing,
   StyleSheet,
   View,
+  useAnimatedValue,
   type ViewStyle,
 } from 'react-native';
 import Svg, {
@@ -138,16 +139,16 @@ export function Avatar({
   }, []);
 
   // Native-driver layer (the wrapping View).
-  const float = useRef(new Animated.Value(0)).current;
-  const pop = useRef(new Animated.Value(1)).current;
-  const tilt = useRef(new Animated.Value(0)).current;
+  const float = useAnimatedValue(0);
+  const pop = useAnimatedValue(1);
+  const tilt = useAnimatedValue(0);
 
   // SVG-prop layer.
-  const blink = useRef(new Animated.Value(1)).current;
-  const eyeX = useRef(new Animated.Value(0)).current;
-  const glanceX = useRef(new Animated.Value(0)).current;
-  const mouthOpen = useRef(new Animated.Value(0)).current;
-  const sparkle = useRef(new Animated.Value(0)).current;
+  const blink = useAnimatedValue(1);
+  const eyeX = useAnimatedValue(0);
+  const glanceX = useAnimatedValue(0);
+  const mouthOpen = useAnimatedValue(0);
+  const sparkle = useAnimatedValue(0);
 
   // Idle float, for the life of the component.
   useEffect(() => {

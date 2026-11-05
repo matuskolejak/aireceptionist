@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import {
   AccessibilityInfo,
   ActivityIndicator,
@@ -12,6 +12,7 @@ import {
   type StyleProp,
   type TextStyle,
   type ViewStyle,
+  useAnimatedValue,
 } from 'react-native';
 
 import { Avatar } from '@/components/avatar';
@@ -267,8 +268,11 @@ export function Button({
           does not collapse to the spinner's width and jump the layout. */}
       <View style={[styles.buttonContent, busy && styles.hidden]}>
         {iconPosition === 'left' && iconEl}
+        {/* Capped like Chip: at the accessibility sizes an uncapped label broke inside
+            words ("Cancel appoint / ment") in a pill or a full-width button. */}
         <Text
           style={[size === 'pill' ? styles.buttonTextPill : styles.buttonText, { color: fg }]}
+          maxFontSizeMultiplier={MAX_FONT_SCALE}
         >
           {label}
         </Text>
@@ -595,7 +599,7 @@ export function Skeleton({
   style?: StyleProp<ViewStyle>;
 }) {
   const reduceMotion = useReduceMotion();
-  const pulse = useRef(new Animated.Value(1)).current;
+  const pulse = useAnimatedValue(1);
   useEffect(() => {
     if (reduceMotion) {
       pulse.setValue(0.7);
@@ -672,7 +676,7 @@ export function SkeletonForm({ fields = 4 }: { fields?: number }) {
  */
 export function LiveDot({ size = 10 }: { size?: number }) {
   const reduceMotion = useReduceMotion();
-  const pulse = useRef(new Animated.Value(1)).current;
+  const pulse = useAnimatedValue(1);
   useEffect(() => {
     if (reduceMotion) {
       pulse.setValue(1);
@@ -1061,8 +1065,32 @@ export function ListRow({
   accessibilityHint?: string;
 }) {
   const oneLine = useLineLimit(1);
+  // At the accessibility sizes the icon and the chevron left the label a sliver, so it broke
+  // inside words ("Receptioni / st"). They move to a row above the text, which then gets the
+  // full width, like iOS Settings cells at these sizes.
+  const stacked = useLargeText();
   const off = Boolean(disabled || busy);
   const labelColor = destructive ? colors.errorText : colors.text;
+  const iconEl = icon ? (
+    <Icon name={icon} size={ICON.row} color={destructive ? colors.errorText : colors.textSecondary} />
+  ) : null;
+  const trailingEl = busy ? (
+    <ActivityIndicator size="small" color={colors.textSecondary} />
+  ) : trailing === 'chevron' ? (
+    <Icon name="chevron-forward" size={ICON.chevron} color={colors.textMuted} />
+  ) : trailing === 'external' ? (
+    <Icon name="open-outline" size={ICON.chevron} color={colors.textMuted} />
+  ) : null;
+  const textEl = (
+    <View style={stacked ? undefined : styles.flex}>
+      <Text style={[styles.listLabel, { color: labelColor }]}>{label}</Text>
+      {value ? (
+        <Text style={styles.listValue} numberOfLines={oneLine}>
+          {value}
+        </Text>
+      ) : null}
+    </View>
+  );
   return (
     <Pressable
       onPress={onPress}
@@ -1076,29 +1104,30 @@ export function ListRow({
       // would otherwise look idle while swallowing taps.
       style={({ pressed }) => [
         styles.listRow,
+        stacked && styles.listRowStacked,
         divided && styles.divided,
         pressed && styles.pressed,
         disabled && !busy && styles.buttonOff,
       ]}
     >
-      {icon ? (
-        <Icon name={icon} size={ICON.row} color={destructive ? colors.errorText : colors.textSecondary} />
-      ) : null}
-      <View style={styles.flex}>
-        <Text style={[styles.listLabel, { color: labelColor }]}>{label}</Text>
-        {value ? (
-          <Text style={styles.listValue} numberOfLines={oneLine}>
-            {value}
-          </Text>
-        ) : null}
-      </View>
-      {busy ? (
-        <ActivityIndicator size="small" color={colors.textSecondary} />
-      ) : trailing === 'chevron' ? (
-        <Icon name="chevron-forward" size={ICON.chevron} color={colors.textMuted} />
-      ) : trailing === 'external' ? (
-        <Icon name="open-outline" size={ICON.chevron} color={colors.textMuted} />
-      ) : null}
+      {stacked ? (
+        <>
+          {iconEl || trailingEl ? (
+            <View style={styles.listRowHead}>
+              {/* An empty View keeps the chevron at the right when there is no icon. */}
+              {iconEl ?? <View />}
+              {trailingEl}
+            </View>
+          ) : null}
+          {textEl}
+        </>
+      ) : (
+        <>
+          {iconEl}
+          {textEl}
+          {trailingEl}
+        </>
+      )}
     </Pressable>
   );
 }
@@ -1358,6 +1387,9 @@ export const styles = StyleSheet.create({
     minHeight: 48,
     paddingVertical: spacing.md,
   },
+  // Accessibility sizes: icon and chevron on a row above the full-width label.
+  listRowStacked: { flexDirection: 'column', alignItems: 'stretch', gap: spacing.sm },
+  listRowHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   listLabel: { ...type.body },
   listValue: { ...type.caption, marginTop: 2 },
   divided: {

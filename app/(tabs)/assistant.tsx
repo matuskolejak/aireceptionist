@@ -1,6 +1,6 @@
 import * as Haptics from 'expo-haptics';
 import { useRouter } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { AvatarRing } from '@/components/avatar';
@@ -32,7 +32,7 @@ import {
   useLineLimit,
 } from '@/components/ui';
 import { colors, radius, spacing, type } from '@/constants/theme';
-import { api } from '@/lib/api';
+import { api, ApiError } from '@/lib/api';
 import type { AssistantDetail, AssistantSummary, KnowledgeState } from '@/lib/types';
 import { useQuery } from '@/lib/use-query';
 
@@ -315,6 +315,25 @@ function KnowledgeRow({
           : 'Nothing yet. Teach it your website or a few notes.')
     : '';
 
+  // At the accessibility sizes the icon and the chevron left the title a sliver
+  // ("Knowledg / e"), so they go on a row above the text, as in ListRow.
+  const stacked = useLargeText();
+  const iconEl = (
+    <Icon name="sparkles-outline" size={ICON.row} color={colors.textSecondary} style={stacked ? undefined : styles.knowIcon} />
+  );
+  const chevronEl = <Icon name="chevron-forward" size={ICON.chevron} color={colors.textMuted} />;
+  const textEl = (
+    <View style={stacked ? undefined : styles.flex}>
+      <Text style={styles.knowTitle}>Knowledge</Text>
+      <Text style={styles.knowMeta}>{meta}</Text>
+      {preview ? (
+        <Text style={styles.knowPreview} numberOfLines={2}>
+          {preview}
+        </Text>
+      ) : null}
+    </View>
+  );
+
   return (
     <Pressable
       onPress={onPress}
@@ -324,19 +343,28 @@ function KnowledgeRow({
       accessibilityLabel={`Knowledge, ${meta}`}
       accessibilityHint="Opens what your receptionist knows"
       android_ripple={ripple}
-      style={({ pressed: down }) => [styles.knowRow, divided && styles.divided, down && pressed]}
+      style={({ pressed: down }) => [
+        styles.knowRow,
+        stacked && styles.knowRowStacked,
+        divided && styles.divided,
+        down && pressed,
+      ]}
     >
-      <Icon name="sparkles-outline" size={ICON.row} color={colors.textSecondary} style={styles.knowIcon} />
-      <View style={styles.flex}>
-        <Text style={styles.knowTitle}>Knowledge</Text>
-        <Text style={styles.knowMeta}>{meta}</Text>
-        {preview ? (
-          <Text style={styles.knowPreview} numberOfLines={2}>
-            {preview}
-          </Text>
-        ) : null}
-      </View>
-      <Icon name="chevron-forward" size={ICON.chevron} color={colors.textMuted} />
+      {stacked ? (
+        <>
+          <View style={styles.knowHead}>
+            {iconEl}
+            {chevronEl}
+          </View>
+          {textEl}
+        </>
+      ) : (
+        <>
+          {iconEl}
+          {textEl}
+          {chevronEl}
+        </>
+      )}
     </Pressable>
   );
 }
@@ -440,16 +468,20 @@ function CreateSheet({
   const [name, setName] = useState('Receptionist');
   const [busy, setBusy] = useState(false);
   const [state, setState] = useState<{ ok: boolean; message: string } | null>(null);
+  const router = useRouter();
   // A ref, not `busy`: return pressed twice in one tick would still read the
   // stale state and send a second POST - a duplicate receptionist.
   const inFlight = useRef(false);
 
-  useEffect(() => {
+  // Reset on each open, during render, so the last attempt never shows for a frame.
+  const [shownVisible, setShownVisible] = useState(visible);
+  if (shownVisible !== visible) {
+    setShownVisible(visible);
     if (visible) {
       setName('Receptionist');
       setState(null);
     }
-  }, [visible]);
+  }
 
   const trimmed = name.trim();
 
@@ -463,7 +495,15 @@ function CreateSheet({
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       await onCreated(res.id, res.warning);
     } catch (err) {
-      setState({ ok: false, message: (err as Error).message });
+      if (err instanceof ApiError && err.code === 'assistant_limit') {
+        // Not a failure to report but a step to take: the plans. The alert has
+        // its own window, so it shows while the sheet slides away.
+        onClose();
+        Alert.alert('Receptionist limit reached', err.message, [
+          { text: 'Not now', style: 'cancel' },
+          { text: 'See plans', onPress: () => router.push('/paywall') },
+        ]);
+      } else setState({ ok: false, message: (err as Error).message });
     } finally {
       inFlight.current = false;
       setBusy(false);
@@ -525,6 +565,8 @@ const styles = StyleSheet.create({
     minHeight: 48,
     paddingVertical: spacing.md,
   },
+  knowRowStacked: { flexDirection: 'column', alignItems: 'stretch', gap: spacing.sm },
+  knowHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   knowIcon: { alignSelf: 'flex-start', marginTop: 2 },
   knowTitle: { ...type.body },
   knowMeta: { ...type.caption, marginTop: 2 },

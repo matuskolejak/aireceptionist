@@ -283,6 +283,7 @@ export default function SignInScreen() {
         <Text style={styles.title} accessibilityRole="header" maxFontSizeMultiplier={MAX_TITLE_SCALE}>
           {expired ? 'Welcome back' : 'Welcome'}
         </Text>
+        {/* Body text: it keeps scaling. The title above and the Google button are capped. */}
         <Text style={styles.subtitle}>
           {sent
             ? codeRequested
@@ -320,6 +321,13 @@ export default function SignInScreen() {
               onChange={(v) => {
                 setCode(v);
                 setError(null);
+                // A pasted or autofilled code verifies on its own: the number
+                // pad has no return key, and the button can sit under the
+                // keyboard. Only on the change that completes the code, so a
+                // failed code is not sent again until it is edited.
+                if (v.length === 6 && code.length < 6 && !busy) {
+                  void run('verify', () => verifyCode(email, v));
+                }
               }}
               onSubmit={() => void onVerify()}
               editable={!busy}
@@ -506,7 +514,11 @@ function ProviderButton({
       <View style={styles.providerMark}>
         {pending ? <ActivityIndicator size="small" color={colors.ink} /> : icon}
       </View>
-      <Text style={styles.providerText}>{pending ? pendingLabel : label}</Text>
+      {/* Capped like the other compact controls, so it keeps pace with Apple's
+          fixed native button above it; uncapped it wrapped to three lines. */}
+      <Text style={styles.providerText} maxFontSizeMultiplier={MAX_FONT_SCALE}>
+        {pending ? pendingLabel : label}
+      </Text>
     </Pressable>
   );
 }
@@ -562,7 +574,6 @@ function CodeInput({
       autoComplete="one-time-code"
       textContentType="oneTimeCode"
       autoFocus
-      maxLength={6}
       returnKeyType="go"
       onSubmitEditing={onSubmit}
       editable={editable}

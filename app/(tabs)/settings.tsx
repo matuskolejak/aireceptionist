@@ -17,6 +17,7 @@ import {
   SectionCard,
   SkeletonCard,
   StaleNotice,
+  useLargeText,
   useLineLimit,
 } from '@/components/ui';
 import { colors, fonts, MAX_TITLE_SCALE, spacing, type } from '@/constants/theme';
@@ -78,6 +79,27 @@ export default function SettingsScreen() {
     }
   }
 
+  // Also under the error state: Sign out and Delete account need no account
+  // data, and a first load that fails must not hide them (App Review 5.1.1(v)).
+  const accountCard = (
+    <SectionCard title="Account">
+      <ListRow
+        icon="log-out-outline"
+        label="Sign out"
+        trailing="none"
+        busy={signingOut}
+        onPress={confirmSignOut}
+      />
+      <ListRow
+        icon="trash-outline"
+        label="Delete account"
+        destructive
+        onPress={() => router.push('/settings/delete-account')}
+        divided
+      />
+    </SectionCard>
+  );
+
   if (loading) {
     return (
       <Screen title="Settings">
@@ -90,12 +112,16 @@ export default function SettingsScreen() {
     );
   }
 
-  // Only a missing payload is a dead end. A failed background refetch still has
-  // the last good account to show, with the notice below saying so.
+  // A missing payload shows the error, with the account actions still under it.
+  // A failed background refetch still has the last good account to show, with
+  // the notice below saying so.
   if (!data) {
     return (
       <Screen title="Settings">
-        <ErrorState message={error ?? 'Could not load your account.'} onRetry={refresh} />
+        <View style={styles.body}>
+          <ErrorState message={error ?? 'Could not load your account.'} onRetry={refresh} />
+          {accountCard}
+        </View>
       </Screen>
     );
   }
@@ -149,7 +175,6 @@ export default function SettingsScreen() {
           <ListRow
             icon="notifications-outline"
             label="Alerts"
-            value={alertsSummary(data.notifications.email, data.notifications.sms)}
             onPress={() => router.push('/settings/alerts')}
             divided
           />
@@ -206,34 +231,12 @@ export default function SettingsScreen() {
           />
         </SectionCard>
 
-        <SectionCard title="Account">
-          <ListRow
-            icon="log-out-outline"
-            label="Sign out"
-            trailing="none"
-            busy={signingOut}
-            onPress={confirmSignOut}
-          />
-          <ListRow
-            icon="trash-outline"
-            label="Delete account"
-            destructive
-            onPress={() => router.push('/settings/delete-account')}
-            divided
-          />
-        </SectionCard>
+        {accountCard}
 
         <Text style={styles.version}>Version {Constants.expoConfig?.version ?? '1.0.0'}</Text>
       </View>
     </Screen>
   );
-}
-
-function alertsSummary(email: boolean, sms: boolean): string {
-  if (email && sms) return 'Email and text';
-  if (email) return 'Email only';
-  if (sms) return 'Text only';
-  return 'Off';
 }
 
 // ── Subscription ─────────────────────────────────────────────────────────────
@@ -303,6 +306,9 @@ function SubscriptionCard({
   onRestored: () => Promise<void>;
 }) {
   const router = useRouter();
+  // At the accessibility sizes the badge beside the title left it a sliver ("Subscripti / on"),
+  // so the badge goes under the title there.
+  const largeText = useLargeText();
   const { platformProvider, available, unavailableReason, busy, restore, manage } = usePurchases();
 
   if (!billing) {
@@ -363,8 +369,17 @@ function SubscriptionCard({
   return (
     <SectionCard
       title="Subscription"
-      action={planName ? <Badge label={planName} tone={status?.warn ? 'warning' : 'neutral'} /> : null}
+      action={
+        planName && !largeText ? (
+          <Badge label={planName} tone={status?.warn ? 'warning' : 'neutral'} />
+        ) : null
+      }
     >
+      {planName && largeText ? (
+        <View style={styles.planBadge}>
+          <Badge label={planName} tone={status?.warn ? 'warning' : 'neutral'} />
+        </View>
+      ) : null}
       {status ? (
         status.warn ? (
           <Notice tone="warning" live style={styles.statusNotice}>
@@ -460,6 +475,7 @@ const styles = StyleSheet.create({
   email: { ...type.footnote, marginTop: 2 },
   status: { ...type.bodySm, marginBottom: spacing.xs },
   statusNotice: { marginBottom: spacing.sm },
+  planBadge: { alignSelf: 'flex-start', marginBottom: spacing.sm },
   cardText: { ...type.bodySm, color: colors.textSecondary, marginTop: spacing.sm },
   inlineButton: { alignSelf: 'flex-start', marginTop: spacing.md },
   choose: { marginTop: spacing.md },

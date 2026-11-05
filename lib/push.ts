@@ -39,6 +39,8 @@ export type PushState =
   | { status: 'muted' }
   /** The OS prompt was answered "no", or was answered "no" previously. */
   | { status: 'denied' }
+  /** The OS has not asked yet. Turning the Alerts switch on shows the prompt. */
+  | { status: 'undetermined' }
   /** Physical device required - the push service has nothing to route to on a simulator. */
   | { status: 'unsupported'; reason: string }
   /** Registered with Expo but the server refused the token. */
@@ -95,11 +97,10 @@ async function expoToken(id: string): Promise<string> {
  * Whether this install has muted delivery.
  *
  * The real flag is the `enabled` column on the server's push_devices row, but
- * /api/mobile/push has no GET to read it back, and registering on the next cold
- * start upserts `enabled: true` straight over the mute. So the choice is
- * mirrored on the device: this is what re-applies the mute after a re-register,
- * and it is the only thing the Alerts switch can read to show the user what
- * they chose last time.
+ * /api/mobile/push has no GET to read it back, and every cold start registers
+ * again. So the choice is mirrored on the device: each register sends it as
+ * `muted`, which keeps the mute across a re-register, and it is the only thing
+ * the Alerts switch can read to show the user what they chose last time.
  *
  * AsyncStorage rather than SecureStore on purpose. It is a preference, not a
  * secret, and on iOS SecureStore is the Keychain, whose items survive deleting
@@ -161,6 +162,7 @@ async function ensureAndroidChannel(): Promise<void> {
   if (Platform.OS !== 'android') return;
   await Notifications.setNotificationChannelAsync(CHANNEL_ID, {
     name: 'Calls and bookings',
+    // eslint-disable-next-line import/namespace -- a false positive: the enum is re-exported from NotificationChannelManager.types, and tsc checks this import.
     importance: Notifications.AndroidImportance.HIGH,
     vibrationPattern: [0, 250, 250, 250],
     lightColor: '#1D1D1D',
@@ -181,7 +183,7 @@ function unsupportedReason(): PushState | null {
   return null;
 }
 
-/** Mint the token, hand it to the server, and re-apply a mute. Permission already granted. */
+/** Mint the token and hand it to the server with this install's mute. Permission already granted. */
 async function registerGranted(id: string): Promise<PushState> {
   let token: string;
   try {
@@ -190,16 +192,19 @@ async function registerGranted(id: string): Promise<PushState> {
     return { status: 'error', reason: (err as Error).message };
   }
 
+  // Sent with the register, so the server writes the row muted in the same
+  // call. Before, it wrote `enabled: true` and only a second call muted it.
+  const muted = await readMuted();
   try {
-    await api.registerPush(token, Platform.OS);
+    await api.registerPush(token, Platform.OS, muted);
   } catch (err) {
     return { status: 'error', reason: (err as Error).message };
   }
 
-  // The server's upsert writes `enabled: true` on every register, so without
-  // this a mute is silently undone by the next launch and the phone starts
-  // buzzing again with nothing in the UI having changed.
-  if (await readMuted()) {
+  // A server that predates `muted` ignores it and still writes `enabled: true`,
+  // so the mute is also sent on its own. Without this, an older server would
+  // undo the mute on every launch.
+  if (muted) {
     try {
       await api.setPushEnabled(token, false);
       return { status: 'muted' };

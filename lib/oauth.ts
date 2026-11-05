@@ -1,6 +1,7 @@
 import * as Linking from 'expo-linking';
 import * as WebBrowser from 'expo-web-browser';
 
+import { friendlyOAuthError } from './auth-errors';
 import { supabase, supabaseConfigured } from './supabase';
 
 /**
@@ -54,6 +55,10 @@ function parseCallback(url: string): {
   accessToken?: string;
   refreshToken?: string;
   error?: string;
+  /** The `error` slug alone, such as `access_denied`. */
+  errorType?: string;
+  /** Supabase Auth's own `error_code`: set only when Supabase refused, not the provider. */
+  errorCode?: string;
 } {
   const out: ReturnType<typeof parseCallback> = {};
 
@@ -65,10 +70,14 @@ function parseCallback(url: string): {
     // `error_description` is the human sentence; `error` is a slug like
     // `access_denied`. Prefer the sentence, fall back to the slug.
     const error = params.get('error_description') ?? params.get('error');
+    const errorType = params.get('error');
+    const errorCode = params.get('error_code');
     if (code) out.code = code;
     if (accessToken) out.accessToken = accessToken;
     if (refreshToken) out.refreshToken = refreshToken;
     if (error) out.error = error;
+    if (errorType) out.errorType = errorType;
+    if (errorCode) out.errorCode = errorCode;
   };
 
   const [beforeHash, afterHash] = url.split('#');
@@ -117,11 +126,19 @@ export async function signInWithProvider(provider: OAuthProvider): Promise<strin
   if (result.type !== 'success') return null;
 
   const parsed = parseCallback(result.url);
-  if (parsed.error) return parsed.error;
+  // Cancel on the provider's own page is a choice too: Google sends
+  // `access_denied`, Apple on the web `user_cancelled_authorize`. Supabase
+  // sends `access_denied` as well when it refuses (sign-ups closed, banned
+  // user), but then adds `error_code`, so those still show.
+  const cancelled =
+    !parsed.errorCode &&
+    (parsed.errorType === 'access_denied' || parsed.errorType === 'user_cancelled_authorize');
+  if (cancelled) return null;
+  if (parsed.error) return friendlyOAuthError(parsed.error);
 
   if (parsed.code) {
     const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(parsed.code);
-    return exchangeError ? exchangeError.message : null;
+    return exchangeError ? friendlyOAuthError(exchangeError.message) : null;
   }
 
   if (parsed.accessToken && parsed.refreshToken) {
@@ -129,7 +146,7 @@ export async function signInWithProvider(provider: OAuthProvider): Promise<strin
       access_token: parsed.accessToken,
       refresh_token: parsed.refreshToken,
     });
-    return setError ? setError.message : null;
+    return setError ? friendlyOAuthError(setError.message) : null;
   }
 
   // A success result with nothing usable in it means the redirect was

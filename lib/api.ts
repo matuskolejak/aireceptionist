@@ -42,17 +42,23 @@ export const apiConfigured = BASE.length > 0;
  * route answers `{ error, code? }`). Branch on it, never on the message:
  *   409 billing apple/verify, google/sync: 'stripe_active' | 'other_account'
  *   403 assistants/[id]/number: 'plan_required' | 'limit_reached' | 'sandbox' | 'unverified'
+ *   403 assistants (create): 'assistant_limit'
+ *   400 assistants/[id]/test-call: 'test_call_country' | 'invalid_phone'
+ *   429 assistants/[id]/test-call: 'test_call_limit', with `upgrade` true when the account has no plan
  * e.g. `e instanceof ApiError && e.code === 'stripe_active'`.
  */
 export class ApiError extends Error {
   readonly status: number;
   readonly code?: string;
+  /** 429 `test_call_limit`: true when a plan lifts the limit (the account has none). */
+  readonly upgrade?: boolean;
 
-  constructor(status: number, message: string, code?: string) {
+  constructor(status: number, message: string, code?: string, upgrade?: boolean) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
+    this.upgrade = upgrade;
   }
 }
 
@@ -147,7 +153,7 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
     // misconfigured EXPO_PUBLIC_API_URL can return HTML - so never assume JSON.
     const body = await res
       .json()
-      .then((b: { error?: unknown; code?: unknown }) => b)
+      .then((b: { error?: unknown; code?: unknown; upgrade?: unknown }) => b)
       .catch(() => null);
     const message = typeof body?.error === 'string' && body.error ? body.error : null;
     // A 5xx is the server's problem, and its own words for it ("Failed to
@@ -162,6 +168,7 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
         ? (message ?? 'Something went wrong. Try again.')
         : 'Something went wrong on our side. Try again.',
       typeof body?.code === 'string' ? body.code : undefined,
+      typeof body?.upgrade === 'boolean' ? body.upgrade : undefined,
     );
   }
 
@@ -368,7 +375,7 @@ export const api = {
     request<AssistantDetail>(`/api/mobile/assistants/${id}${query({ tz })}`),
 
   createAssistant: (name: string) =>
-    post<{ id: string; warning: string | null }>('/api/mobile/assistants', { name }),
+    post<{ id: string; warning: string | null }>('/api/mobile/assistants', { name }, { slow: true }),
 
   /**
    * Save part of an assistant. `patch.sections` must name every section the
@@ -505,9 +512,12 @@ export const api = {
   liveCall: () =>
     request<{ activeCallId: string | null }>('/api/mobile/notifications?live=1'),
 
-  /** Register this install for push. Idempotent - safe on every cold start. */
-  registerPush: (token: string, platform: string) =>
-    post<WriteResult>('/api/mobile/push', { token, platform }, { write: false }),
+  /**
+   * Register this install for push. Idempotent - safe on every cold start.
+   * `muted` is this install's stored mute, so a register never turns alerts back on.
+   */
+  registerPush: (token: string, platform: string, muted: boolean) =>
+    post<WriteResult>('/api/mobile/push', { token, platform, muted }, { write: false }),
 
   /** Mute or unmute delivery server-side, keeping the row. */
   setPushEnabled: (token: string, enabled: boolean) =>
@@ -559,6 +569,16 @@ export const api = {
   /** Forget one install and stop push to it. Does not end that device's session - see the route. */
   revokeDevice: (id: string) =>
     request<WriteResult>(`/api/mobile/devices${query({ deviceId: id })}`, {
+      method: 'DELETE',
+    }),
+
+  /**
+   * Forget every install but this one (the X-Device-Id header) and stop push to
+   * them. The server half of "Sign out everywhere else": call it only after
+   * signOut({ scope: 'others' }) - see signOutOthers in context/AuthContext.tsx.
+   */
+  signOutOtherDevices: () =>
+    request<WriteResult>(`/api/mobile/devices${query({ others: '1' })}`, {
       method: 'DELETE',
     }),
 };

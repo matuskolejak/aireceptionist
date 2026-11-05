@@ -45,7 +45,7 @@ export const MOCK_NUMBER = '+35315924410';
 export const MOCK_OWNER_PHONE = '+353871234567';
 export const MOCK_OWNER_EMAIL = 'owner@example.com';
 export const MOCK_ASSISTANT = 'Ava';
-export const MOCK_VOICE_ID = 'XB0fDUnXU5powFXDhCwa'; // Charlotte
+export const MOCK_VOICE_ID = 'zGjIP4SZlMnY9m93k97r'; // Hope
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -775,7 +775,7 @@ export function buildAssistant(now: number, name = MOCK_ASSISTANT, business = MO
       'Book check-ups, cleanings and fillings into the calendar. Take a message for anything clinical.',
     language: 'multi',
     voiceId: MOCK_VOICE_ID,
-    voiceName: 'Charlotte',
+    voiceName: 'Hope',
     enabled: true,
     connected: true,
     number: '',
@@ -1034,19 +1034,37 @@ export const PLANS: OnboardingPlan[] = [
 
 export const PLAN_TERMS = { annualDiscount: 0.15, extraMinuteEur: 0.09 };
 
-/** web FALLBACK_VOICES. Previews are null: mock mode has no ElevenLabs. */
+/**
+ * web GET /api/mobile/voices: the curated voices, then the library voices as
+ * "lib:<owner>:<voice id>:<name>" pick values (the save path sends them back
+ * unchanged). Previews are null: mock mode has no ElevenLabs, and the web list
+ * has no static preview URLs.
+ */
 const VOICES: { voiceId: string; name: string; description: string; gender: 'f' | 'm' }[] = [
-  { voiceId: '21m00Tcm4TlvDq8ikWAM', name: 'Rachel', description: 'American · professional, calm', gender: 'f' },
-  { voiceId: 'EXAVITQu4vr4xnSDxMaL', name: 'Sarah', description: 'American · professional, soft', gender: 'f' },
-  { voiceId: MOCK_VOICE_ID, name: 'Charlotte', description: 'English · friendly', gender: 'f' },
-  { voiceId: 'cgSgspJ2msm6clMCkdW9', name: 'Jessica', description: 'American · expressive', gender: 'f' },
-  { voiceId: 'JBFqnCBsd6RMkjVDRZzb', name: 'George', description: 'British · warm', gender: 'm' },
-  { voiceId: 'onwK4e9ZLuTAKqWW03F9', name: 'Daniel', description: 'British · news', gender: 'm' },
-  { voiceId: 'TX3LPaxmHKxFdv7VOQHJ', name: 'Liam', description: 'American · narration', gender: 'm' },
-  { voiceId: 'pNInz6obpgDQGcFmaJgB', name: 'Adam', description: 'American · deep', gender: 'm' },
+  { voiceId: 'zGjIP4SZlMnY9m93k97r', name: 'Hope', description: 'American · female', gender: 'f' },
+  { voiceId: 'l4Coq6695JDX9xtLqXDE', name: 'Lauren', description: 'American · female', gender: 'f' },
+  { voiceId: '6fZce9LFNG3iEITDfqZZ', name: 'Charlotte', description: 'British · female', gender: 'f' },
+  { voiceId: '56bWURjYFHyYyVf490Dp', name: 'Emma', description: 'Australian · female', gender: 'f' },
+  { voiceId: 'Aa6nEBJJMKJwJkCx8VU2', name: 'Quentin', description: 'American · male', gender: 'm' },
+  { voiceId: 'cjVigY5qzO86Huf0OWal', name: 'Eric', description: 'American · male', gender: 'm' },
+  { voiceId: 'onwK4e9ZLuTAKqWW03F9', name: 'Daniel', description: 'British · male', gender: 'm' },
+  { voiceId: 'IKne3meq5aSn9XLyUdCD', name: 'Charlie', description: 'Australian · male', gender: 'm' },
+  {
+    voiceId: 'lib:ad598cfdbf0d63bed5de560d343d1427cac42d2be6b5b3ac0c7a2724a70d8ce9:C92s6vssSLlabgIln1iY:Michelle',
+    name: 'Michelle',
+    description: 'Irish · female',
+    gender: 'f',
+  },
+  {
+    voiceId: "lib:014c1a54c9fcde9c63538a39cfd7013ae93686ee5492d3fd5f90018fe7261019:BOt7zZh6gzfWlIUYnyPz:Caleb%20O'Farrell",
+    name: "Caleb O'Farrell",
+    description: 'Irish · male',
+    gender: 'm',
+  },
 ];
 
-const FUNNEL_VOICE_IDS = ['21m00Tcm4TlvDq8ikWAM', MOCK_VOICE_ID, 'pNInz6obpgDQGcFmaJgB', 'JBFqnCBsd6RMkjVDRZzb'];
+/** web FUNNEL_VOICES order: Hope, Charlotte, Quentin, Daniel. */
+const FUNNEL_VOICE_IDS = ['zGjIP4SZlMnY9m93k97r', '6fZce9LFNG3iEITDfqZZ', 'Aa6nEBJJMKJwJkCx8VU2', 'onwK4e9ZLuTAKqWW03F9'];
 
 export const VOICE_CATALOG: VoiceCatalog = {
   voices: VOICES.map(({ voiceId, name, description, gender }) => ({

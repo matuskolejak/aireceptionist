@@ -32,6 +32,22 @@ export function statusOf(
 }
 
 /**
+ * Pausing changes what every caller hears, so every pause control asks first,
+ * in the same words: Home's Pause button and the Receptionist tab's and the
+ * editor's switches. Resuming is harmless and stays one tap, so it never asks.
+ */
+export function confirmPause(onConfirm: () => void) {
+  Alert.alert(
+    'Pause your receptionist?',
+    "While paused, your receptionist tells callers you're closed and takes a message. It won't book or transfer calls.",
+    [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Pause', style: 'destructive', onPress: onConfirm },
+    ],
+  );
+}
+
+/**
  * The power switch with its optimistic override. The hub never remounts (a
  * tab the navigator keeps alive), so seeding state from the prop would freeze
  * the switch at whatever it was on first render; local state is only the
@@ -49,11 +65,9 @@ export function usePower(
   // right after awaiting it would snap the switch back to the stale prop
   // whenever the follow-up refetch never landed - "Answering calls" for a
   // paused line.
-  useEffect(() => {
-    if (pending !== null && assistant.enabled === pending) setPending(null);
-  }, [assistant.enabled, pending]);
+  if (pending !== null && assistant.enabled === pending) setPending(null);
 
-  const toggle = useCallback(
+  const apply = useCallback(
     async (next: boolean) => {
       // Optimistic: the switch has to move under the thumb. On failure it snaps
       // back AND says why - a switch that silently springs back reads as a
@@ -76,6 +90,19 @@ export function usePower(
       }
     },
     [assistant.id, assistant.name, onChanged],
+  );
+
+  // A controlled Switch only moves when `value` does, so while the question is
+  // up the switch springs back to on, and Cancel leaves nothing to undo.
+  const toggle = useCallback(
+    (next: boolean) => {
+      if (next) {
+        void apply(true);
+        return;
+      }
+      confirmPause(() => void apply(false));
+    },
+    [apply],
   );
 
   return { enabled: pending ?? assistant.enabled, busy, toggle };

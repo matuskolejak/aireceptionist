@@ -1,5 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import type { Session } from '@supabase/supabase-js';
+import { isAuthRetryableFetchError, type Session } from '@supabase/supabase-js';
+import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
 import {
   createContext,
@@ -7,15 +8,18 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
 
 import { api } from '@/lib/api';
+import { friendlyAuthError } from '@/lib/auth-errors';
 import { describeDevice } from '@/lib/device';
 import { signInWithProvider as oauthSignIn, type OAuthProvider } from '@/lib/oauth';
 import { unregisterPush } from '@/lib/push';
 import { AUTH_STORAGE_KEY, AUTH_VERIFIER_KEY, secureStorage } from '@/lib/secure-storage';
+import { markSessionEnded } from '@/lib/session-ended';
 import { bindAuthRefreshToAppState, supabase, supabaseConfigured } from '@/lib/supabase';
 
 interface AuthValue {
@@ -38,11 +42,19 @@ interface AuthValue {
   signInWithProvider: (provider: OAuthProvider) => Promise<string | null>;
   /**
    * End the session on this phone. Never hangs and never leaves the session
-   * behind, online or not. `afterDeletion` is for a just-deleted account: the
-   * server already dropped the push rows, and this install's local traces of
-   * that account (drafts, flags, purchase bookkeeping) go too.
+   * behind, online or not. The account's AI consent, funnel draft, unread mark
+   * and last test number go first, so the next account here starts clean.
+   * `afterDeletion` is for a just-deleted account: the server already dropped
+   * the push rows, and the rest of this install's local traces of that account
+   * (push flags, purchase bookkeeping) go too.
    */
   signOut: (opts?: { afterDeletion?: boolean }) => Promise<void>;
+  /**
+   * End every other session of this account - the other phones and the
+   * website - and keep this one, then forget those installs on the server.
+   * Returns an error message, or null when it worked. Never hangs.
+   */
+  signOutOthers: () => Promise<string | null>;
 }
 
 const AuthContext = createContext<AuthValue | null>(null);
@@ -68,6 +80,13 @@ export function initialsFrom(name: string, email: string): string {
 const SIGN_OUT_SERVER_MS = 3000;
 
 /**
+ * How long "Sign out everywhere else" waits on the server: the API request
+ * bound (TIMEOUT_MS in lib/api.ts). Unlike sign-out there is no local fallback,
+ * so a slow network gets the full time before the screen shows an error.
+ */
+const SIGN_OUT_OTHERS_MS = 20_000;
+
+/**
  * This install's traces of an account, cleared after that account is deleted.
  * Each key is owned elsewhere: the funnel draft (lib/onboarding-draft.ts),
  * push (lib/push.ts), Activity's unread mark, the AI-processing consent
@@ -84,10 +103,17 @@ const ACCOUNT_LOCAL_KEYS = [
 ];
 /** The last test-call number (Receptionist screen), kept in the keychain. */
 const ACCOUNT_SECURE_KEYS = ['testcall.last'];
+/**
+ * The keys every sign-out clears, with the secure ones above. The next account
+ * on this phone must not take the consent as its own or get the draft replayed
+ * onto it. The push and purchase keys stay: lib/push.ts and
+ * context/PurchaseContext.tsx own them, and the purchase keys carry a user id.
+ */
+const SIGN_OUT_LOCAL_KEYS = ['onboarding.draft', 'activity.lastSeenAt', 'ai.consent.v1'];
 
-async function clearAccountLocalState(): Promise<void> {
+async function clearAccountLocalState(localKeys: string[]): Promise<void> {
   try {
-    await AsyncStorage.multiRemove(ACCOUNT_LOCAL_KEYS);
+    await AsyncStorage.multiRemove(localKeys);
   } catch {
     // Leftovers are cosmetic (a stale draft, a primer that stays dismissed).
   }
@@ -101,36 +127,28 @@ function delay(ms: number): Promise<'timeout'> {
 }
 
 /**
- * GoTrue's messages in plain words. The known ones are matched loosely (the
- * wording has shifted between releases); anything else is shown as sent, which
- * is still better than a blank.
+ * The session auth-js keeps in storage, read without auth-js. Only for an
+ * offline cold start (see AuthProvider). Null unless it parses and has a user
+ * id and a refresh token.
  */
-export function friendlyAuthError(message: string): string {
-  const m = message.toLowerCase();
-  if (/expired|invalid|incorrect|not found/.test(m) && /token|otp|code/.test(m)) {
-    return 'That code is wrong or has expired. Send a new one.';
+async function readStoredSession(): Promise<Session | null> {
+  try {
+    const raw = await secureStorage.getItem(AUTH_STORAGE_KEY);
+    if (!raw) return null;
+    const stored = JSON.parse(raw) as Partial<Session> | null;
+    return stored?.user?.id && stored.refresh_token ? (stored as Session) : null;
+  } catch {
+    return null;
   }
-  if (/rate limit|too many|security purposes/.test(m)) {
-    return 'Too many attempts. Wait a minute and try again.';
-  }
-  if (/signups? not allowed|disabled/.test(m)) {
-    return 'Sign-ups are not open right now.';
-  }
-  if (/validate email|invalid format|valid email/.test(m)) {
-    return 'Enter a valid email address.';
-  }
-  if (/error sending|magic link|smtp|email/.test(m) && /send|deliver/.test(m)) {
-    return 'The email could not be sent. Try again in a moment.';
-  }
-  if (/network|fetch|connection/.test(m)) {
-    return 'No connection. Check your network and try again.';
-  }
-  return message;
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
+  // Set by signOut() so the auth listener can tell a deliberate sign-out from
+  // a session auth-js ended itself. Cleared only by SIGNED_IN: signOut() awaits
+  // unregisterPush() first, and a TOKEN_REFRESHED in that wait must not clear it.
+  const userSignOut = useRef(false);
 
   useEffect(() => {
     // Dev-only fake session (EXPO_PUBLIC_MOCK=1): no Supabase, no keychain.
@@ -138,6 +156,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (__DEV__ && process.env.EXPO_PUBLIC_MOCK === '1') {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const mock = require('@/lib/mock/session') as typeof import('@/lib/mock/session');
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- dev-only mock session (EXPO_PUBLIC_MOCK=1); release builds drop this branch.
       setSession(mock.mockSession());
       setLoading(false);
       return;
@@ -151,14 +170,44 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     let active = true;
     supabase.auth
       .getSession()
-      .then(({ data }) => {
+      .then(async ({ data, error }) => {
+        // Offline cold start with an expired access token: the refresh could
+        // not reach the server, so auth-js answers "no session" but keeps the
+        // stored one. That is a connection problem, not a sign-out. Keep the
+        // user signed in on the stored session: the app reads only its user,
+        // API calls take their token from getSession() (lib/api.ts), and the
+        // auto-refresh replaces it (TOKEN_REFRESHED) or ends it (SIGNED_OUT)
+        // once the network is back. Awaited, so `loading` stays true until it
+        // is in state and the Stack does not mount on the funnel first.
+        // `prev ??` keeps a TOKEN_REFRESHED that arrived earlier.
+        if (!data.session && error && isAuthRetryableFetchError(error)) {
+          const stored = await readStoredSession();
+          if (active) setSession((prev) => prev ?? stored);
+          return;
+        }
         if (active) setSession(data.session);
       })
       .finally(() => {
         if (active) setLoading(false);
       });
 
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, next) => {
+    const { data: sub } = supabase.auth.onAuthStateChange((event, next) => {
+      // getSession() above gives the first answer. INITIAL_SESSION repeats it,
+      // and after an offline refresh failure it is null, which would undo the
+      // stored session restored there.
+      if (event === 'INITIAL_SESSION') return;
+      // A SIGNED_OUT that signOut() did not start: the refresh was refused
+      // (signed out elsewhere, or a reused token). Note it, so the root layout
+      // opens sign-in and sign-in says the session ended.
+      if (event === 'SIGNED_IN') {
+        userSignOut.current = false;
+      } else if (event === 'SIGNED_OUT' && !userSignOut.current) {
+        markSessionEnded();
+        // signOut() did not run, so unregisterPush never dropped the token, and
+        // its DELETE can no longer authenticate. Stop push at the OS instead.
+        // The next sign-in registers again (registerIfGranted in app/_layout.tsx).
+        void Notifications.unregisterForNotificationsAsync().catch(() => {});
+      }
       setSession(next);
     });
     const unbind = bindAuthRefreshToAppState();
@@ -263,6 +312,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const signOut = useCallback(async (opts?: { afterDeletion?: boolean }) => {
+    userSignOut.current = true;
     const afterDeletion = opts?.afterDeletion === true;
 
     // Before the session goes, not after: dropping the push token is an
@@ -272,15 +322,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // every push row of the account, and the session may no longer verify.
     if (!afterDeletion) await unregisterPush();
 
+    // Also before the session goes: the signed-out funnel reads the draft as
+    // soon as it mounts, and the next account must not inherit any of it.
+    await clearAccountLocalState(afterDeletion ? ACCOUNT_LOCAL_KEYS : SIGN_OUT_LOCAL_KEYS);
+
     if (__DEV__ && process.env.EXPO_PUBLIC_MOCK === '1') {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const mock = require('@/lib/mock/session') as typeof import('@/lib/mock/session');
       mock.setMockSession(null);
     } else {
-      // A deleted user's refresh token is already dead server-side: 'local'
-      // only drops it here. The global sign-out revokes it everywhere.
+      // 'local' ends this phone's session only: GoTrue revokes its refresh
+      // token, and the website and other phones stay signed in. Ending those is
+      // signOutOthers ("Sign out everywhere else" in Signed-in devices). A
+      // deleted user's token is already dead server-side, so 'local' just drops it.
       const result = await Promise.race([
-        supabase.auth.signOut(afterDeletion ? { scope: 'local' } : undefined),
+        supabase.auth.signOut({ scope: 'local' }),
         delay(SIGN_OUT_SERVER_MS),
       ]);
       // auth-js returns early WITHOUT removing the stored session when it could
@@ -292,8 +348,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     }
 
-    if (afterDeletion) await clearAccountLocalState();
     setSession(null);
+  }, []);
+
+  const signOutOthers = useCallback(async (): Promise<string | null> => {
+    // Sessions first: a phone whose session has ended fails mobileAuth, so it
+    // cannot register itself again after its device row goes below. Mock mode
+    // has no other sessions, and must not end a real one left in the keychain.
+    if (!(__DEV__ && process.env.EXPO_PUBLIC_MOCK === '1')) {
+      const result = await Promise.race([
+        supabase.auth.signOut({ scope: 'others' }),
+        delay(SIGN_OUT_OTHERS_MS),
+      ]);
+      if (result === 'timeout') {
+        return 'The request timed out. Check your network and try again.';
+      }
+      if (result.error) return friendlyAuthError(result.error.message);
+    }
+    // Then forget those installs and stop their call alerts. Best effort: their
+    // sessions are gone, so a failure only leaves stale rows in the list.
+    await api.signOutOtherDevices().catch(() => {});
+    return null;
   }, []);
 
   const value = useMemo<AuthValue>(() => {
@@ -315,8 +390,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       verifyCode,
       signInWithProvider,
       signOut,
+      signOutOthers,
     };
-  }, [session, loading, sendCode, verifyCode, signInWithProvider, signOut]);
+  }, [session, loading, sendCode, verifyCode, signInWithProvider, signOut, signOutOthers]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

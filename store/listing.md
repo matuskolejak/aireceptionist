@@ -67,18 +67,27 @@ Privacy Policy: https://aireceptionistnow.com/privacy-policy
 ### Review notes (App Review Information)
 
 ```
-Sign in: tap "Sign in", enter the review email below and tap "Email me a code", then enter
-the review code below. This account is already set up with a receptionist and sample calls.
+Sign in: tap "Sign in" at the top of the first screen. Type the review email below. Tap
+"I already have a code" (do not tap "Continue with email"). Enter the 6-digit review code
+below and tap "Verify and continue". This account is already set up with a receptionist
+and sample calls. Sample calls have transcripts and summaries. They have no audio, so
+playback is empty for them.
 
 Subscriptions are sold with StoreKit (Solo and Team, monthly and yearly). Phone calls are
 answered by our server; the app shows them, plays recordings and sends alerts.
 
 AI processing: calls are transcribed and answered by third-party AI providers (ElevenLabs
-for voice). The app asks for consent before a subscription starts this processing.
+for the voice, Google Gemini for understanding). The app asks for consent on the paywall,
+before a subscription starts this processing, and on the onboarding teach step, before
+anything the user teaches is sent.
 ```
 
 Fill in the review email and code from the server's review-login config
-(`lib/mobile/review-login.ts` in the web repo); never commit them here.
+(`APP_REVIEW_EMAIL` and `APP_REVIEW_CODE`, read by `lib/mobile/review-login.ts` in the web
+repo); never commit them here. The code is exactly 6 digits. Before each submission, run
+the web seed (`npx tsx scripts/seed-review-account.ts`, see `docs/app-review.md` in the
+web repo) so the account has the receptionist and sample calls the notes promise. Run it
+again after a reviewer deletes the account.
 
 ## Google Play
 

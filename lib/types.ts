@@ -525,6 +525,12 @@ export interface CalendarState {
   timezone: string;
   /** False when `timezone` is the phone's zone because the account has none saved. */
   timezoneIsAccount: boolean;
+  /**
+   * Provider labels (such as 'Google Calendar') of enabled calendars whose
+   * events could not be read, so `events` may be missing some. Older servers
+   * leave it out: treat that as none.
+   */
+  eventsUnavailable?: string[];
 }
 
 // ── Onboarding ──────────────────────────────────────────────────────────────

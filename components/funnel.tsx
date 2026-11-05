@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode, type Ref } from 'react';
+import { useEffect, type ReactNode, type Ref } from 'react';
 import {
   ActivityIndicator,
   Animated,
@@ -10,6 +10,7 @@ import {
   StyleSheet,
   Text,
   View,
+  useAnimatedValue,
 } from 'react-native';
 
 import { Avatar } from '@/components/avatar';
@@ -66,7 +67,7 @@ export function FunnelHeader({
   /** Signed in: who this is, and the way out (sign out, delete the account). */
   onAccount?: () => void;
 }) {
-  const width = useRef(new Animated.Value(position / total)).current;
+  const width = useAnimatedValue(position / total);
 
   useEffect(() => {
     Animated.spring(width, {
@@ -186,7 +187,7 @@ export function Ask({
   const keyboardUp = useKeyboardUp();
   const compact = large && keyboardUp;
   const label = name.trim() || 'Your receptionist';
-  const enter = useRef(new Animated.Value(0)).current;
+  const enter = useAnimatedValue(0);
 
   // Re-runs on every question, so the words arrive rather than swap.
   useEffect(() => {
@@ -378,8 +379,12 @@ export function Actions({
         >
           {/* The label never changes and the spinner takes the arrow's place,
               so the button does not resize or re-word under the thumb that is
-              still resting on it. */}
-          <Text style={[styles.nextText, waiting && styles.nextTextWaiting]}>
+              still resting on it. The footer's text is capped like the other packed
+              labels: uncapped, at the largest sizes it left the step a thin strip. */}
+          <Text
+            style={[styles.nextText, waiting && styles.nextTextWaiting]}
+            maxFontSizeMultiplier={MAX_FONT_SCALE}
+          >
             {primary.label}
           </Text>
           <View style={styles.trail}>
@@ -397,7 +402,7 @@ export function Actions({
       </View>
 
       {note ? (
-        <Text style={styles.note} accessibilityLiveRegion="polite">
+        <Text style={styles.note} accessibilityLiveRegion="polite" maxFontSizeMultiplier={MAX_FONT_SCALE}>
           {note}
         </Text>
       ) : null}
@@ -417,7 +422,7 @@ export function Actions({
             tertiary.disabled && styles.tertiaryOff,
           ]}
         >
-          <Text style={styles.tertiaryText}>
+          <Text style={styles.tertiaryText} maxFontSizeMultiplier={MAX_FONT_SCALE}>
             {tertiary.hint ? `${tertiary.hint} ` : ''}
             <Text style={styles.tertiaryStrong}>{tertiary.label}</Text>
           </Text>

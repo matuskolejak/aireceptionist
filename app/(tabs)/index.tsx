@@ -3,12 +3,13 @@ import * as Haptics from 'expo-haptics';
 import * as Notifications from 'expo-notifications';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useState } from 'react';
-import { Alert, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { AvatarRing, type AvatarStatus } from '@/components/avatar';
 import { BarChart } from '@/components/BarChart';
 import { DonutChart } from '@/components/DonutChart';
 import { Icon } from '@/components/Icon';
+import { confirmPause } from '@/components/receptionist';
 import { Screen } from '@/components/Screen';
 import {
   Badge,
@@ -69,6 +70,9 @@ const RANGE_OPTIONS: SegmentOption<Range>[] = [
  */
 const LAST_SEEN_KEY = 'activity.lastSeenAt';
 
+/** How often the relative times in Recent calls move while Home stays open. */
+const MINUTE_MS = 60_000;
+
 /** The line under the receptionist's name - the web sidebar's status words. */
 const STATUS_LINE: Record<AvatarStatus, string> = {
   live: 'On a call now',
@@ -81,6 +85,23 @@ export default function HomeScreen() {
   const largeText = useLargeText();
   const twoLines = useLineLimit(2);
   const router = useRouter();
+  // The live banner going away means its call just ended, and the counts and
+  // Recent calls on screen were fetched before that. Count each ended call
+  // during render (the "previous value in state" pattern, as in
+  // app/onboarding.tsx) and make the count a query dependency, so the overview
+  // reloads once with the payload kept. A different id counts too: the call
+  // before it is over.
+  const liveCallId = useLiveCall();
+  const [seenLiveId, setSeenLiveId] = useState<string | null>(null);
+  const [endedCalls, setEndedCalls] = useState(0);
+  if (liveCallId !== seenLiveId) {
+    setSeenLiveId(liveCallId);
+    if (seenLiveId !== null) setEndedCalls((n) => n + 1);
+  }
+  // Counts power saves, also a query dependency. A reload that started before a
+  // save can land after it and carry the old power state; the reload after the
+  // save supersedes it, and the payload stays on screen meanwhile.
+  const [powerSaves, setPowerSaves] = useState(0);
   // Mirrors `/dashboard?range=month`. The month rollup is a separate, heavier
   // query, so - like the web page - it is only requested once you ask for it.
   const [range, setRange] = useState<Range>('today');
@@ -91,11 +112,11 @@ export default function HomeScreen() {
   // - which carries `analytics: null` too - as a failed month rollup.
   const { data, error, loading, refreshing, refresh } = useQuery<Overview & { range: Range }>(
     async () => ({ ...(await api.overview(range)), range }),
-    [range],
+    [range, endedCalls, powerSaves],
   );
-  const liveCallId = useLiveCall();
   const activitySeenAt = useActivitySeenAt();
   const primer = usePushPrimer();
+  const now = useMinuteClock();
 
   const openActivity = useCallback(() => router.push('/notifications'), [router]);
 
@@ -126,6 +147,7 @@ export default function HomeScreen() {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     try {
       await api.setAssistantPower(id, next);
+      setPowerSaves((n) => n + 1);
     } catch (err) {
       // Roll back rather than leave the band showing a state the phone line is
       // not actually in, and say why - a haptic alone reads as "done".
@@ -137,9 +159,9 @@ export default function HomeScreen() {
     }
   }, []);
 
-  // Pausing stops the line answering, and on a phone it sits one thumb away
-  // from "Call to try it" - so it asks first. Resuming is harmless and stays
-  // one tap.
+  // Pausing changes what every caller hears, and on a phone it sits one thumb
+  // away from "Call to try it" - so it asks first, with the same question the
+  // Receptionist tab's switch asks. Resuming is harmless and stays one tap.
   const togglePower = useCallback(() => {
     if (!data?.assistant) return;
     const current = power && power.base === data ? power.enabled : data.assistant.enabled;
@@ -148,11 +170,16 @@ export default function HomeScreen() {
       void applyPower(id, true, data);
       return;
     }
-    Alert.alert('Pause your receptionist?', 'Calls will not be answered until you resume.', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Pause', style: 'destructive', onPress: () => void applyPower(id, false, data) },
-    ]);
+    confirmPause(() => void applyPower(id, false, data));
   }, [data, power, applyPower]);
+
+  // Needs attention's Resume: the band's own call and never a pause, so it
+  // asks nothing. The optimistic override hides the row at once; a failure
+  // brings it back with the usual "Could not resume".
+  const resume = useCallback(() => {
+    if (!data?.assistant) return;
+    void applyPower(data.assistant.id, true, data);
+  }, [data, applyPower]);
 
   // Only the very first load blanks the screen, and even then into the shape
   // of what is coming rather than a spinner. A range switch re-runs the query
@@ -178,9 +205,10 @@ export default function HomeScreen() {
     );
   }
 
-  // A load with a payload already on screen: a range switch. Only the block
-  // that actually depends on the range needs to say it is busy.
-  const switching = loading;
+  // A load with a payload already on screen. A range switch shows it on the
+  // tiles, the only block that depends on the range. The reload after a live
+  // call ends keeps the range, so it stays silent and swaps the data when it lands.
+  const switching = loading && data.range !== range;
   // The segment leads with the range being fetched while a switch is in flight;
   // once it settles it follows the payload actually rendered, so a failed
   // switch does not label the previous range's numbers as something they are not.
@@ -303,6 +331,8 @@ export default function HomeScreen() {
               {bandText}
             </Text>
           </View>
+          {/* Paused still answers the phone: it takes messages and nothing else. */}
+          {!offline && !enabled && <Text style={styles.statusSub}>Taking messages only.</Text>}
           <View style={[styles.statusActions, largeText && styles.statusActionsStacked]}>
             {/* Pausing "the receptionist" is only unambiguous with exactly one. */}
             {data.assistant && data.assistantCount === 1 && (
@@ -315,7 +345,7 @@ export default function HomeScreen() {
                 busy={powerBusy}
                 accessibilityHint={
                   enabled
-                    ? `Stops ${data.assistant.name} answering calls`
+                    ? `${data.assistant.name} only takes messages until you resume`
                     : `${data.assistant.name} starts answering calls again`
                 }
                 style={largeText ? undefined : styles.flexBtn}
@@ -367,22 +397,22 @@ export default function HomeScreen() {
           </SectionCard>
         ) : data.range === 'month' ? (
           <>
-            <View style={styles.tiles}>
+            <View style={[styles.tiles, largeText && styles.tilesStacked]}>
               <StatTile label="Total calls" value={data.analytics?.totals.calls ?? 0} />
               <StatTile label="Avg call time" value={data.analytics?.totals.avgDuration ?? '-'} />
             </View>
-            <View style={styles.tiles}>
+            <View style={[styles.tiles, largeText && styles.tilesStacked]}>
               <StatTile label="Answer rate" value={data.analytics?.totals.answerRate ?? '-'} />
               <StatTile label="Bookings" value={data.analytics?.totals.bookings ?? 0} />
             </View>
           </>
         ) : (
           <>
-            <View style={styles.tiles}>
+            <View style={[styles.tiles, largeText && styles.tilesStacked]}>
               <StatTile label="Calls" value={data.today.calls} />
               <StatTile label="Answered" value={data.today.answered} />
             </View>
-            <View style={styles.tiles}>
+            <View style={[styles.tiles, largeText && styles.tilesStacked]}>
               {/* The only tile that goes anywhere: missed calls are the one
                   number you would want to act on straight away. */}
               <StatTile
@@ -401,6 +431,8 @@ export default function HomeScreen() {
           assistantId={data.assistant?.id ?? null}
           assistantCount={data.assistantCount}
           online={enabled}
+          busy={powerBusy}
+          onResume={resume}
           number={data.number}
           calendarConnected={data.calendarConnected}
           minutesUsed={data.monthUsage.minutes}
@@ -472,7 +504,7 @@ export default function HomeScreen() {
                 headline={callHeadline({ outcome: c.outcome, status: c.status, date: c.startedAt })}
                 caller={`${c.flag ? `${c.flag} ` : ''}${callerLabel(c.number)}`}
                 meta={callDuration(c.duration, statusBucket(c.status, c.startedAt))}
-                when={relTime(c.agoMinutes)}
+                when={relTime(minutesAgo(c.agoMinutes, c.startedAt, now))}
                 bucket={statusBucket(c.status, c.startedAt)}
                 outcome={c.outcome}
                 divided={i > 0}
@@ -537,7 +569,7 @@ export default function HomeScreen() {
               />
             }
           >
-            <View style={styles.meterHead}>
+            <View style={[styles.meterHead, largeText && styles.meterHeadStacked]}>
               <Text style={styles.muted}>Minutes</Text>
               <Text style={styles.meterValue}>
                 {data.monthUsage.minutes}
@@ -800,6 +832,48 @@ function PushPrimer({
   );
 }
 
+/**
+ * The time (ms) at the last minute tick, 0 before the first one. Ticks only
+ * while Home is focused and the app is active, like the live-call poll, so the
+ * relative times in Recent calls move without a refetch.
+ */
+function useMinuteClock(): number {
+  const [now, setNow] = useState(0);
+  useFocusEffect(
+    useCallback(() => {
+      let timer: ReturnType<typeof setInterval> | null = null;
+      const start = () => {
+        if (!timer) timer = setInterval(() => setNow(Date.now()), MINUTE_MS);
+      };
+      const stop = () => {
+        if (timer) clearInterval(timer);
+        timer = null;
+      };
+      if (AppState.currentState === 'active') start();
+      const sub = AppState.addEventListener('change', (next) => {
+        if (next === 'active') start();
+        else stop();
+      });
+      return () => {
+        sub.remove();
+        stop();
+      };
+    }, []),
+  );
+  return now;
+}
+
+/**
+ * Minutes since a call started. `agoMinutes` is the server's count when the
+ * payload landed; the minute clock carries it on while Home stays open. Both
+ * only fall behind, so the larger one is the newer reading. A clock at 0 (no
+ * tick yet) or an unparseable start leaves the server's count.
+ */
+function minutesAgo(agoMinutes: number, startedAt: string, now: number): number {
+  const sinceStart = (now - Date.parse(startedAt)) / MINUTE_MS;
+  return Number.isFinite(sinceStart) ? Math.max(agoMinutes, sinceStart) : agoMinutes;
+}
+
 /** When Activity was last opened (ms), re-read whenever Home comes forward. Null until read. */
 function useActivitySeenAt(): number | null {
   const [seenAt, setSeenAt] = useState<number | null>(null);
@@ -920,12 +994,16 @@ interface Issue {
   /** What tapping it does about the problem. Every web issue is a link; a row that only names a fault is a dead end. */
   action: string;
   go: () => void;
+  /** A power call is in flight: the row waits rather than start a second one. */
+  busy?: boolean;
 }
 
 function Issues({
   assistantId,
   assistantCount,
   online,
+  busy,
+  onResume,
   number,
   calendarConnected,
   minutesUsed,
@@ -934,12 +1012,14 @@ function Issues({
   assistantId: string | null;
   assistantCount: number;
   online: boolean;
+  busy: boolean;
+  onResume: () => void;
   number: string;
   calendarConnected: boolean;
   minutesUsed: number;
   minutesIncluded: number;
 }) {
-  const twoLines = useLineLimit(2);
+  const largeText = useLargeText();
   const router = useRouter();
 
   // With one receptionist the fix is on its own screen; the list would only
@@ -954,11 +1034,16 @@ function Issues({
   // is wrong is worse than a phone that says nothing.
   const issues: Issue[] = [];
   if (assistantId && !online) {
+    // One receptionist: Resume does what it says, in place, with the band's
+    // own call. With several, which one to resume is the owner's choice, so
+    // the row opens the list and does not claim to resume.
+    const single = assistantCount === 1;
     issues.push({
       level: 'amber',
       text: 'Your receptionist is paused',
-      action: 'Resume',
-      go: toReceptionist,
+      action: single ? 'Resume' : 'Review',
+      go: single ? onResume : toReceptionist,
+      busy: single && busy,
     });
   }
   if (!number) {
@@ -1000,17 +1085,35 @@ function Issues({
           <Pressable
             key={issue.text}
             onPress={issue.go}
+            disabled={issue.busy}
             accessibilityRole="button"
             accessibilityLabel={`${issue.text}. ${issue.action}`}
+            accessibilityState={{ disabled: Boolean(issue.busy), busy: Boolean(issue.busy) }}
             android_ripple={ripple}
             style={({ pressed: down }) => [styles.issueRow, down && pressed]}
           >
             <Dot color={issue.level === 'red' ? colors.error : colors.warning} />
-            <Text style={styles.issueText} numberOfLines={twoLines}>
-              {issue.text}
-            </Text>
-            <Text style={styles.issueAction}>{issue.action}</Text>
-            <Icon name="chevron-forward" size={ICON.chevron} color={colors.textMuted} />
+            {/* Side by side, the action leaves the text a sliver at the
+                accessibility sizes ("Y / o / u / r"), so there it goes under
+                the text, as in CallRow. */}
+            {largeText ? (
+              <View style={styles.flex}>
+                <Text style={type.bodySm}>{issue.text}</Text>
+                <Text style={[styles.issueAction, styles.issueActionStacked]}>{issue.action}</Text>
+              </View>
+            ) : (
+              <>
+                <Text style={styles.issueText} numberOfLines={2}>
+                  {issue.text}
+                </Text>
+                <Text style={styles.issueAction}>{issue.action}</Text>
+              </>
+            )}
+            {issue.busy ? (
+              <ActivityIndicator size="small" color={colors.textMuted} />
+            ) : (
+              <Icon name="chevron-forward" size={ICON.chevron} color={colors.textMuted} />
+            )}
           </Pressable>
         ))
       )}
@@ -1089,6 +1192,8 @@ const styles = StyleSheet.create({
     fontFamily: fonts.medium,
     flex: 1,
   },
+  /** Lines up under the band text: the dot is 10 wide, plus the row's gap. */
+  statusSub: { ...type.caption, marginTop: 2, marginLeft: 10 + spacing.sm },
   statusActions: {
     flexDirection: 'row',
     gap: spacing.sm,
@@ -1101,6 +1206,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: spacing.md,
   },
+  /** At the accessibility text sizes two tiles side by side break their labels inside a word. */
+  tilesStacked: { flexDirection: 'column' },
   tilesSkeleton: { gap: spacing.md },
   tileSkeleton: {
     ...cardStyle,
@@ -1166,12 +1273,15 @@ const styles = StyleSheet.create({
   },
   issueText: { ...type.bodySm, flex: 1 },
   issueAction: { ...type.caption, fontFamily: fonts.medium },
+  issueActionStacked: { marginTop: 2 },
 
   meterHead: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
   },
+  /** At the accessibility sizes the value ran off the card beside its label, so it goes under it, as in Row. */
+  meterHeadStacked: { flexDirection: 'column', alignItems: 'flex-start', gap: 2 },
   meterValue: {
     ...type.bodySm,
     fontFamily: fonts.semibold,

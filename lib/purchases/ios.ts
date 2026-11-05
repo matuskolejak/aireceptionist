@@ -13,7 +13,7 @@ import type {
   StorePurchaseResult,
   StoreTransaction,
 } from './types';
-import { perMonthDisplay } from './types';
+import { perMonthDisplay, PurchasesRestrictedError } from './types';
 
 /**
  * StoreKit 2 through expo-iap.
@@ -56,7 +56,10 @@ export function createIosAdapter(iap: ExpoIapModule): StoreAdapter {
   const listeners = new Set<(tx: StoreTransaction) => void>();
   let subscriptions: { remove: () => void }[] = [];
   /** The purchase awaiting its transaction, if any. Settled exactly once. */
-  let inflight: { settle: (result: StorePurchaseResult) => void } | null = null;
+  let inflight: {
+    deliver: (tx: StoreTransaction) => void;
+    settle: (result: StorePurchaseResult) => void;
+  } | null = null;
 
   const ours = (productId: string) => refs.some((r) => r.productId === productId);
 
@@ -82,11 +85,10 @@ export function createIosAdapter(iap: ExpoIapModule): StoreAdapter {
         // Anything not ours is another app's noise on a shared sandbox account.
         if (!ours(purchase.productId)) return;
         const tx = toTx(purchase as PurchaseIOS);
-        // One subscription group: a downgrade or a crossgrade to another
-        // duration can deliver the CURRENT product's transaction rather than
-        // the requested sku, so any of our four skus answers the purchase.
+        // The purchase in flight decides whether this delivery is its answer
+        // (see `purchase()`); one that is not still reaches `onTransaction`.
         if (inflight) {
-          inflight.settle({ status: 'transaction', tx });
+          inflight.deliver(tx);
           return;
         }
         listeners.forEach((cb) => cb(tx));
@@ -111,7 +113,11 @@ export function createIosAdapter(iap: ExpoIapModule): StoreAdapter {
         // being added.
         listen();
         try {
-          await iap.initConnection();
+          // False when the device refuses in-app purchases (Screen Time,
+          // device management): openiap then fails every later call, so this
+          // is no connection. The catch below drops the listeners again.
+          const ok = await iap.initConnection();
+          if (!ok) throw new PurchasesRestrictedError();
           connected = true;
         } catch (error) {
           subscriptions.forEach((s) => s.remove());
@@ -159,14 +165,36 @@ export function createIosAdapter(iap: ExpoIapModule): StoreAdapter {
     return new Promise<StorePurchaseResult>((resolve) => {
       let done = false;
       let timer: ReturnType<typeof setTimeout> | null = null;
+      // One subscription group: a downgrade or a crossgrade to another
+      // duration answers with the CURRENT product's transaction, not the
+      // requested sku's. A renewal or a replayed transaction can also land
+      // while the sheet is open. Only the transaction requestPurchase
+      // resolves with tells them apart, so a delivery of another sku waits
+      // in `held` until that answer is back.
+      let back = false;
+      let answerId: string | null = null;
+      let held: StoreTransaction[] = [];
+      /** Hands the held deliveries, all but `except`, to `onTransaction`. */
+      const release = (except?: string) => {
+        const rest = held.filter((t) => t.id !== except);
+        held = [];
+        rest.forEach((t) => listeners.forEach((cb) => cb(t)));
+      };
       const settle = (result: StorePurchaseResult) => {
         if (done) return;
         done = true;
         if (timer) clearTimeout(timer);
         inflight = null;
         resolve(result);
+        release(result.status === 'transaction' ? result.tx.id : undefined);
       };
-      inflight = { settle };
+      const deliver = (tx: StoreTransaction) => {
+        const answers = answerId !== null ? tx.id === answerId : tx.productId === product.productId;
+        if (answers) settle({ status: 'transaction', tx });
+        else if (!back) held.push(tx);
+        else listeners.forEach((cb) => cb(tx));
+      };
+      inflight = { deliver, settle };
       iap
         .requestPurchase({
           // The Supabase user id as appAccountToken: it must be a UUID, and it
@@ -174,11 +202,23 @@ export function createIosAdapter(iap: ExpoIapModule): StoreAdapter {
           request: { apple: { sku: product.productId, appAccountToken: userId } },
           type: 'subs',
         })
-        .then(() => {
+        .then((result) => {
+          if (done) return;
+          back = true;
+          const answer = Array.isArray(result) ? result[0] : result;
+          if (answer && ours(answer.productId)) answerId = toTx(answer as PurchaseIOS).id;
+          // The answer's delivery may have come first. With no answer at all,
+          // the first held delivery answers (any of our skus).
+          const early = answerId !== null ? held.find((t) => t.id === answerId) : held[0];
+          if (early) {
+            settle({ status: 'transaction', tx: early });
+            return;
+          }
+          release();
           // The sheet has closed. The transaction normally lands through the
           // listener at once; if nothing arrives, hand over to the persistent
           // listener (which replays the stored intent) rather than hang.
-          if (!done) timer = setTimeout(() => settle({ status: 'confirming' }), PURCHASE_TIMEOUT_MS);
+          timer = setTimeout(() => settle({ status: 'confirming' }), PURCHASE_TIMEOUT_MS);
         })
         .catch((error: unknown) => settle(mapError(error)));
     });

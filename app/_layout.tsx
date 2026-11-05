@@ -130,6 +130,7 @@ function RootNav() {
   useEffect(() => {
     if (!userId) {
       probedFor.current = null;
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- sign-out forgets the last account's answer; signed-out routing never reads it.
       setSetupDone(null);
       return;
     }

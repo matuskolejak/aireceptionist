@@ -237,6 +237,7 @@ export function useFunnel(signedIn: boolean, email: string): Funnel {
   useEffect(() => {
     // A new session gets its own replay.
     if (!signedIn) flushed.current = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- starts the fetch for this session; load() only clears error before its first await.
     void load();
     // `load` closes over `catalog`, which it sets - depending on it here would
     // refetch forever. The session flipping is the only thing that should

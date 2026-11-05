@@ -62,13 +62,18 @@ import { useSetupGate } from '@/context/SetupGate';
 import { useAiConsent } from '@/lib/ai-consent';
 import { api } from '@/lib/api';
 import { formatPhone } from '@/lib/format';
-import { dial, FORWARDING_GUIDE_URL, openInApp } from '@/lib/links';
+import { dial, FORWARDING_GUIDE_URL, openInApp, SUPPORT_URL } from '@/lib/links';
 import type { DraftBasicsPartial } from '@/lib/onboarding-draft';
 import { voicePersonality, type Mood } from '@/lib/personality';
 import { STORE_NAME, type PlanKey } from '@/lib/purchases';
 import { usePaywall } from '@/lib/purchases/use-paywall';
 import { markPrimerAnswered, primerAnswered, requestAndRegister } from '@/lib/push';
-import type { CalendarConnections, OnboardingState, ProvisionPoll } from '@/lib/types';
+import type {
+  BillingCycle,
+  CalendarConnections,
+  OnboardingState,
+  ProvisionPoll,
+} from '@/lib/types';
 import { useFunnel, type Funnel } from '@/lib/use-funnel';
 import { useQuery } from '@/lib/use-query';
 
@@ -504,10 +509,11 @@ function KnowledgeStep({
   const hasPending = pendingNotes.length > 0;
   useEffect(() => {
     if (aiOk && hasPending) void onRefresh();
-    else if (!aiOk && hasPending) setAskConsent(true);
     // Only the consent and the queue's existence retrigger this.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aiOk, hasPending]);
+  // Waiting notes open the consent box during render, so it shows in the first frame.
+  if (!aiOk && hasPending && !askConsent) setAskConsent(true);
 
   async function teach(typed: string) {
     await funnel.act({ action: 'add-text', text: typed });
@@ -540,6 +546,7 @@ function KnowledgeStep({
 
   useEffect(() => {
     if (aiOk && queued) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- consent can land from storage, not only a tap, so the queued tap is released here.
       setQueued(false);
       void add();
     }
@@ -690,7 +697,7 @@ function KnowledgeStep({
           style={styles.notes}
           value={text}
           onChangeText={setText}
-          placeholder={'We are open 8-6 Monday to Friday.\nA checkup is €45.\nParking is free out back.'}
+          placeholder={'We are open 8-6 Monday to Friday.\nPrices are on our website.\nParking is free out back.'}
           placeholderTextColor={colors.textMuted}
           accessibilityLabel="What your receptionist should know"
           multiline
@@ -990,6 +997,10 @@ function PlanStep({
   const [countryOpen, setCountryOpen] = useState(false);
   const [countryBusy, setCountryBusy] = useState(false);
   const [continuing, setContinuing] = useState(false);
+  // Set from a verified purchase until the refresh swaps this step for
+  // provisioning. Billing reads 'current' first, and without this the step
+  // offered "Continue" on "Your current plan." in between.
+  const [bought, setBought] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   const { mode, cycle, picked, pendingMessage } = paywall;
@@ -1008,6 +1019,18 @@ function PlanStep({
     const timer = setInterval(() => void onRefresh(), PENDING_POLL_MS);
     return () => clearInterval(timer);
   }, [pendingMessage, onRefresh]);
+
+  // Saved as it changes, not only at sign-up: Back to the calendar step
+  // unmounts this step, and coming forward again must reopen on the pick.
+  function pickPlan(id: PlanKey) {
+    paywall.setPicked(id);
+    void funnel.savePlan({ id, cycle });
+  }
+
+  function pickCycle(next: BillingCycle) {
+    paywall.setCycle(next);
+    void funnel.savePlan({ id: picked, cycle: next });
+  }
 
   /**
    * Where the funnel asks for an account.
@@ -1028,8 +1051,13 @@ function PlanStep({
     if (result.outcome === 'purchased') {
       // The server has verified the purchase, marked the account paid and
       // started provisioning; the refresh flips this screen to it.
-      await funnel.clearPlan();
-      await onRefresh();
+      setBought(true);
+      try {
+        await funnel.clearPlan();
+        await onRefresh();
+      } finally {
+        setBought(false);
+      }
     } else if (result.outcome === 'blocked' && result.message) {
       setErr(result.message);
     }
@@ -1099,18 +1127,20 @@ function PlanStep({
   const primary = guest
     ? { label: 'Create my account', onPress: () => void signUp() }
     : owned
-      ? { label: 'Continue', onPress: () => void continueOwned(), busy: continuing }
+      ? { label: 'Continue', onPress: () => void continueOwned(), busy: continuing || bought }
       : {
           label: paywall.ctaLabel,
           onPress: () => void subscribe(),
           disabled: paywall.ctaDisabled || (needsConsent && !aiAccepted),
-          busy: paywall.busy === 'purchase',
+          busy: paywall.busy === 'purchase' || bought,
         };
 
   const note = guest
     ? 'Next: create your account, then subscribe to put me on a real number.'
     : owned
-      ? paywall.statusText
+      ? bought
+        ? 'Subscribed. Setting up your receptionist...'
+        : paywall.statusText
       : (pendingMessage ??
         err ??
         (unticked === 2
@@ -1178,7 +1208,7 @@ function PlanStep({
           <View style={styles.toggle}>
             <CycleToggle
               cycle={cycle}
-              onChange={paywall.setCycle}
+              onChange={pickCycle}
               terms={state.planTerms}
               disabledCycles={paywall.disabledCycles}
               products={{
@@ -1211,7 +1241,7 @@ function PlanStep({
               product={purchases.productFor(plan.id as PlanKey, cycle)}
               priceSource={paywall.priceSourceFor(plan.id as PlanKey, cycle)}
               selected={picked === plan.id}
-              onPress={() => paywall.setPicked(plan.id as PlanKey)}
+              onPress={() => pickPlan(plan.id as PlanKey)}
             />
           ))}
         </View>
@@ -1286,7 +1316,10 @@ function Provisioning({ assistantName }: { assistantName: string }) {
   const finished = useRef(false);
   const inFlight = useRef(false);
   const failures = useRef(0);
-  const startedAt = useRef(Date.now());
+  const startedAt = useRef(0);
+  useEffect(() => {
+    startedAt.current = Date.now();
+  }, []);
 
   // Time in the background is not time spent waiting on screen: shift the
   // start by the pause, so the slow hint does not show the moment the app is back.
@@ -1385,75 +1418,80 @@ function Provisioning({ assistantName }: { assistantName: string }) {
 
   if (poll.status === 'done') {
     return (
-      <ScrollView contentContainerStyle={styles.doneWrap}>
-        {/* The character's payoff: the same face from step 1, celebrating. */}
-        <Avatar mood="celebrate" celebrate size={120} label={name} />
-        {poll.sandbox ? (
-          <>
-            <Text style={styles.stepTitle} accessibilityRole="header" maxFontSizeMultiplier={MAX_TITLE_SCALE}>
-              {name} is set up
-            </Text>
-            <Text style={styles.stepBody}>
-              This was a test purchase, so no live phone number was bought. Everything else is
-              ready - you can hear your receptionist with &quot;Have it call me&quot; on the
-              Receptionist tab.
-            </Text>
-          </>
-        ) : (
-          <>
-            <Text style={styles.stepTitle} accessibilityRole="header" maxFontSizeMultiplier={MAX_TITLE_SCALE}>
-              {name} is answering
-            </Text>
-            {poll.e164 ? (
-              <Pressable
-                onPress={() => void dial(poll.e164 as string)}
-                accessibilityRole="button"
-                accessibilityLabel={`Call ${formatPhone(poll.e164)}`}
-                style={({ pressed: down }) => [styles.numberButton, down && pressed]}
-              >
-                <Icon name="call" size={18} color={colors.ink} />
-                <Text style={styles.doneNumber}>{formatPhone(poll.e164)}</Text>
-              </Pressable>
-            ) : null}
-            <Text style={styles.stepBody}>
-              {poll.e164
-                ? 'Ring that number and hear it for yourself.'
-                : 'Everything is ready. Your number and settings are in the app.'}
-            </Text>
-            {poll.e164 ? (
-              <>
-                {/* The number only gets calls once the business line forwards
-                    to it. Carrier codes differ by carrier, so the steps live in
-                    the guide, not here. */}
-                <Notice
-                  title={`Send your calls to ${name}`}
-                  icon="call-outline"
-                  style={styles.forwardNotice}
-                  action={
-                    <Button
-                      label="How to forward calls"
-                      variant="secondary"
-                      size="pill"
-                      onPress={() => void openInApp(FORWARDING_GUIDE_URL)}
-                      style={styles.forwardLink}
-                    />
-                  }
+      <View style={styles.doneScreen}>
+        <ScrollView contentContainerStyle={styles.doneWrap}>
+          {/* The character's payoff: the same face from step 1, celebrating. */}
+          <Avatar mood="celebrate" celebrate size={120} label={name} />
+          {poll.sandbox ? (
+            <>
+              <Text style={styles.stepTitle} accessibilityRole="header" maxFontSizeMultiplier={MAX_TITLE_SCALE}>
+                {name} is set up
+              </Text>
+              <Text style={styles.stepBody}>
+                This was a test purchase, so no live phone number was bought. Everything else is
+                ready - you can hear your receptionist with &quot;Have it call me&quot; on the
+                Receptionist tab.
+              </Text>
+            </>
+          ) : (
+            <>
+              <Text style={styles.stepTitle} accessibilityRole="header" maxFontSizeMultiplier={MAX_TITLE_SCALE}>
+                {name} is answering
+              </Text>
+              {poll.e164 ? (
+                <Pressable
+                  onPress={() => void dial(poll.e164 as string)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Call ${formatPhone(poll.e164)}`}
+                  style={({ pressed: down }) => [styles.numberButton, down && pressed]}
                 >
-                  Turn on call forwarding on your business line to the number above. Your phone
-                  carrier can do it, or use the steps in our guide.
-                </Notice>
-                <Text style={styles.stepBody}>
-                  Then call your business number from another phone to check that {name} answers.
-                </Text>
-              </>
-            ) : null}
-          </>
-        )}
+                  <Icon name="call" size={18} color={colors.ink} />
+                  <Text style={styles.doneNumber}>{formatPhone(poll.e164)}</Text>
+                </Pressable>
+              ) : null}
+              <Text style={styles.stepBody}>
+                {poll.e164
+                  ? 'Ring that number and hear it for yourself.'
+                  : 'Everything is ready. Your number and settings are in the app.'}
+              </Text>
+              {poll.e164 ? (
+                <>
+                  {/* The number only gets calls once the business line forwards
+                      to it. Carrier codes differ by carrier, so the steps live in
+                      the guide, not here. */}
+                  <Notice
+                    title={`Send your calls to ${name}`}
+                    icon="call-outline"
+                    style={styles.forwardNotice}
+                    action={
+                      <Button
+                        label="How to forward calls"
+                        variant="secondary"
+                        size="pill"
+                        onPress={() => void openInApp(FORWARDING_GUIDE_URL)}
+                        style={styles.forwardLink}
+                      />
+                    }
+                  >
+                    Turn on call forwarding on your business line to the number above. Your phone
+                    carrier can do it, or use the steps in our guide.
+                  </Notice>
+                  <Text style={styles.stepBody}>
+                    Then call your business number from another phone to check that {name} answers.
+                  </Text>
+                </>
+              ) : null}
+            </>
+          )}
 
-        <PushPrimer />
-
-        <Button label="Open the app" size="lg" onPress={openApp} style={styles.cta} />
-      </ScrollView>
+          <PushPrimer />
+        </ScrollView>
+        {/* Pinned under the scroll, so the way on stays on screen when the
+            number, the forwarding steps and the alerts card fill a smaller phone. */}
+        <View style={styles.doneFooter}>
+          <Button label="Open the app" size="lg" onPress={openApp} />
+        </View>
+      </View>
     );
   }
 
@@ -1472,8 +1510,8 @@ function Provisioning({ assistantName }: { assistantName: string }) {
           </Notice>
         ) : null}
         <Text style={styles.stepBody}>
-          Your payment is fine - this step just failed. Try again, or open the app and we&apos;ll
-          keep working on it.
+          Your payment went through - only the setup step failed. Tap Retry to try again. If it
+          keeps failing, contact support and we will finish it for you.
         </Text>
         <Button label="Retry" size="lg" onPress={retry} style={styles.cta} />
         <Button
@@ -1481,6 +1519,13 @@ function Provisioning({ assistantName }: { assistantName: string }) {
           size="lg"
           variant="secondary"
           onPress={openApp}
+          style={styles.ctaSecond}
+        />
+        <Button
+          label="Contact support"
+          size="lg"
+          variant="ghost"
+          onPress={() => void openInApp(SUPPORT_URL)}
           style={styles.ctaSecond}
         />
       </ScrollView>
@@ -1734,6 +1779,8 @@ const styles = StyleSheet.create({
   forwardLink: { alignSelf: 'flex-start' },
   cta: { marginTop: spacing.xl, alignSelf: 'stretch' },
   ctaSecond: { marginTop: spacing.sm, alignSelf: 'stretch' },
+  doneScreen: { flex: 1 },
+  doneFooter: { paddingHorizontal: spacing.xl, paddingTop: spacing.sm, paddingBottom: spacing.md },
   doneWrap: {
     flexGrow: 1,
     alignItems: 'center',

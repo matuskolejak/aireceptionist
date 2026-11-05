@@ -4,6 +4,7 @@ import { Platform } from 'react-native';
 import type * as AppleAuthentication from 'expo-apple-authentication';
 
 import { api } from './api';
+import { friendlyOAuthError } from './auth-errors';
 import { supabase, supabaseConfigured } from './supabase';
 
 /**
@@ -103,7 +104,7 @@ export async function signInWithAppleNative(
     token: credential.identityToken,
     nonce: rawNonce,
   });
-  if (error) return error.message;
+  if (error) return friendlyOAuthError(error.message);
 
   // Apple sends the name on the FIRST sign-in only, so it is saved now or
   // never. A failure here costs the display name, not the session.

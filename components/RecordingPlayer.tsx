@@ -1,5 +1,6 @@
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import * as Haptics from 'expo-haptics';
+import { useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -107,6 +108,10 @@ export function RecordingPlayer({ callId }: { callId: string }) {
   const player = useAudioPlayer(source);
   const status = useAudioPlayerStatus(player);
 
+  // A screen pushed over the call (Knowledge, Appointments) must not play the
+  // recording under it. Paused, not stopped: the position stays for coming back.
+  useFocusEffect(useCallback(() => () => player.pause(), [player]));
+
   const [speedIndex, setSpeedIndex] = useState(0);
   // While a finger is on the bar, the thumb follows the finger rather than the
   // player - otherwise every status tick yanks it back to the real position.
@@ -121,8 +126,10 @@ export function RecordingPlayer({ callId }: { callId: string }) {
   // everything it reads at gesture time lives in a ref instead of state.
   const widthRef = useRef(0);
   const durationRef = useRef(0);
-  widthRef.current = width;
-  durationRef.current = duration;
+  useEffect(() => {
+    widthRef.current = width;
+    durationRef.current = duration;
+  }, [width, duration]);
   const barRef = useRef<ViewInstance>(null);
   /** The bar's x in window coords, needed to turn a drag's absolute x into a position. */
   const originRef = useRef(0);
@@ -144,6 +151,7 @@ export function RecordingPlayer({ callId }: { callId: string }) {
 
   const pan = useMemo(
     () =>
+      // eslint-disable-next-line react-hooks/refs -- create() only stores these handlers; they read the refs on touch, never during render.
       PanResponder.create({
         onStartShouldSetPanResponder: () => true,
         onMoveShouldSetPanResponder: () => true,
@@ -186,15 +194,16 @@ export function RecordingPlayer({ callId }: { callId: string }) {
     [duration, player, status.currentTime],
   );
 
-  const toggle = useCallback(() => {
+  const toggle = useCallback(async () => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (status.playing) {
       player.pause();
       return;
     }
     // Replaying after the end starts from the end and looks like a dead button.
+    // The seek must land first: play() at the very end pauses again at once.
     if (duration > 0 && (status.currentTime ?? 0) >= duration - 0.25) {
-      void player.seekTo(0);
+      await player.seekTo(0);
     }
     player.play();
   }, [duration, player, status.currentTime, status.playing]);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 
 import {
   CONFIRMING_MESSAGE,
@@ -18,7 +18,8 @@ export type { PriceSource } from './types';
  *
  *   buy                no subscription - Subscribe
  *   change             subscribed here, a different plan or cycle is picked - Switch
- *   current            subscribed here, the picked plan+cycle is the one held
+ *   current            subscribed here, the picked plan+cycle is the one held;
+ *                      or this store is retrying a failed renewal (past_due)
  *   managed-elsewhere  billed on the web (LIVE STRIPE), complimentary, or on the
  *                      other store - text only, never a purchase (decision 1a/1b)
  *   signed-out         the guest funnel - prices, no purchase
@@ -58,8 +59,9 @@ export interface Paywall {
   pendingMessage: string | null;
   /**
    * Re-read billing while a purchase is waiting on the store or the server.
-   * Resolves true once the subscription is active, which also clears
-   * `pendingMessage`; false leaves the note (and the disabled CTA) in place.
+   * Resolves true once the subscription is active (for a plan change: on the
+   * new plan and cycle), which also clears `pendingMessage`; false leaves the
+   * note (and the disabled CTA) in place.
    */
   checkAgain: () => Promise<boolean>;
   checking: boolean;
@@ -110,6 +112,9 @@ export function usePaywall({
   const [accepted, setAccepted] = useState(false);
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
+  // The plan and cycle a plan change asked for, while its note is up: the old
+  // plan stays active until the change lands, so `active` alone proves nothing.
+  const changeTarget = useRef<{ plan: PlanKey; cycle: BillingCycle } | null>(null);
 
   const planName = (key: PlanKey) =>
     plans.find((p) => p.id === key)?.name ?? key.charAt(0).toUpperCase() + key.slice(1);
@@ -143,13 +148,12 @@ export function usePaywall({
     [available, ready, loadError, plans, productFor],
   );
 
-  // A cycle the store cannot sell at all must not stay picked.
-  useEffect(() => {
-    if (disabledCycles.includes(cycle)) {
-      const other = CYCLES.find((c) => !disabledCycles.includes(c));
-      if (other) setCycle(other);
-    }
-  }, [cycle, disabledCycles]);
+  // A cycle the store cannot sell at all must not stay picked. Fixed during
+  // render, so the unsellable cycle never shows as picked for a frame.
+  if (disabledCycles.includes(cycle)) {
+    const other = CYCLES.find((c) => !disabledCycles.includes(c));
+    if (other) setCycle(other);
+  }
 
   let mode: PaywallMode;
   let statusText: string | null = null;
@@ -171,6 +175,11 @@ export function usePaywall({
     } else {
       mode = available ? 'change' : 'unavailable';
     }
+  } else if (billing?.provider === platformProvider && billing.status === 'past_due') {
+    // The store is retrying a failed renewal: the plan is still held here, so
+    // no Subscribe. The 'current' block's Manage subscription opens the store.
+    mode = 'current';
+    statusText = `Your ${storeName} payment did not go through. Update your payment method to keep your receptionist.`;
   } else {
     mode = available ? 'buy' : 'unavailable';
   }
@@ -178,6 +187,7 @@ export function usePaywall({
   let ctaLabel: string;
   let ctaDisabled = true;
   const canBuy = mode === 'buy' || mode === 'change';
+  const changing = mode === 'change';
   if (mode === 'signed-out') {
     ctaLabel = 'Sign in to subscribe';
   } else if (mode === 'current') {
@@ -212,11 +222,13 @@ export function usePaywall({
     }
     if (!canBuy || !product || !accepted) return { outcome: 'blocked' };
     setPendingMessage(null);
+    // The cards stay tappable while the note is up, so remember what was bought.
+    changeTarget.current = changing ? { plan: picked, cycle } : null;
     const result = await purchases.purchase(picked, cycle, { acceptedTerms: true, context });
     if (result.outcome === 'pending') setPendingMessage(result.message ?? PENDING_MESSAGE);
     else if (result.outcome === 'confirming') setPendingMessage(result.message ?? CONFIRMING_MESSAGE);
     return result;
-  }, [priceSource, retryProducts, canBuy, product, accepted, purchases, picked, cycle, context]);
+  }, [priceSource, retryProducts, canBuy, changing, product, accepted, purchases, picked, cycle, context]);
 
   const restore = useCallback(async (): Promise<RestoreResult> => {
     setPendingMessage(null);
@@ -227,9 +239,16 @@ export function usePaywall({
     setChecking(true);
     try {
       const snapshot = await purchases.refreshBilling();
-      const active = Boolean(snapshot?.active);
-      if (active) setPendingMessage(null);
-      return active;
+      const target = changeTarget.current;
+      // A plan change is done only once the account holds the new plan and cycle.
+      const done = target
+        ? Boolean(snapshot?.active) && snapshot?.plan === target.plan && snapshot?.cycle === target.cycle
+        : Boolean(snapshot?.active);
+      if (done) {
+        changeTarget.current = null;
+        setPendingMessage(null);
+      }
+      return done;
     } finally {
       setChecking(false);
     }

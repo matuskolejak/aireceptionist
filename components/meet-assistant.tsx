@@ -2,6 +2,7 @@ import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-au
 import * as Haptics from 'expo-haptics';
 import { useEffect, useImperativeHandle, useMemo, useRef, useState, type Ref } from 'react';
 import {
+  AccessibilityInfo,
   Dimensions,
   Pressable,
   ScrollView,
@@ -16,7 +17,7 @@ import {
 import { inputStyleLg, SearchField } from '@/components/form';
 import { Actions, Ask, Pill, StepScroll } from '@/components/funnel';
 import { Icon, type IconName } from '@/components/Icon';
-import { ICON, IconButton, useLineLimit } from '@/components/ui';
+import { ICON, IconButton, useLargeText, useLineLimit } from '@/components/ui';
 import { colors, control, fonts, radius, spacing, type } from '@/constants/theme';
 import { countryForLocale } from '@/lib/locale';
 import { isValidAlertPhone } from '@/lib/onboarding-draft';
@@ -78,6 +79,10 @@ const QUESTIONS = [
 ] as const;
 
 const LAST = QUESTIONS.length - 1;
+
+/** Why step 1's Continue waits. Shown under the field and read out on a press. */
+const SITE_ERROR = 'Check the website address, like example.com, or leave it empty.';
+const NAME_NEEDED = 'Type the business name, or a website below.';
 
 /**
  * Ready-made names, so question 2 is a tap rather than an invented word.
@@ -173,6 +178,9 @@ export function MeetAssistant({
 }) {
   const cfg = state.config;
   const countries = state.countries;
+  // At the accessibility sizes "Change" sat beside the text and broke inside the word, so the
+  // "Showing ... voices" row stacks there.
+  const largeText = useLargeText();
   const dials = useMemo(() => catalog?.dialCodes ?? [], [catalog]);
   const voices = useMemo(() => catalog?.voices ?? [], [catalog]);
 
@@ -189,6 +197,8 @@ export function MeetAssistant({
    * through "brightdental.co" wrong while the owner was still typing.
    */
   const [siteTouched, setSiteTouched] = useState(cfg.companyWebsite.trim().length > 0);
+  /** Set when Continue or Done is pressed with both answers empty, so the step says why. */
+  const [askedEmpty, setAskedEmpty] = useState(false);
   /**
    * The website field, so the business field's return key can move focus INTO
    * it. Both fields used to declare `returnKeyType="next"` and then call
@@ -214,7 +224,11 @@ export function MeetAssistant({
   const [name, setName] = useState(cfg.assistantName);
   // The phone's own region before the first country in the list: an Irish
   // phone wants an Irish number, and the list starts with the US.
-  const [country, setCountry] = useState(() => cfg.country || countryForLocale(countries));
+  // With no catalogue yet, countryForLocale can only answer its 'US'
+  // fallback, and the draft would keep it. '' means not picked yet.
+  const [country, setCountry] = useState(() =>
+    cfg.country || (countries.length > 0 ? countryForLocale(countries) : ''),
+  );
   const [gender, setGender] = useState<'f' | 'm'>(cfg.voiceGender);
   const [voiceId, setVoiceId] = useState(cfg.voiceId);
 
@@ -250,6 +264,7 @@ export function MeetAssistant({
   useEffect(() => {
     if (dialTouched.current || !dials.length) return;
     const match = dials.find((d) => d.code === country);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- follows the country and the late dial catalogue until a hand pick (a ref); the field is on a later question.
     if (match) setPhoneCode(match.code);
   }, [country, dials]);
 
@@ -261,11 +276,14 @@ export function MeetAssistant({
 
   // Keep the voice and the gender chip agreeing: picking a gender moves the
   // voice with it unless the current one already matches.
-  useEffect(() => {
-    if (genderVoices.length === 0) return;
-    if (genderVoices.some((v) => v.voiceId === voiceId)) return;
+  // Done during render, so no frame shows a voice of the other gender.
+  if (genderVoices.length > 0 && !genderVoices.some((v) => v.voiceId === voiceId)) {
     setVoiceId(genderVoices[0].voiceId);
-  }, [genderVoices, voiceId]);
+  }
+
+  // A catalogue that lands after mount brings the phone's region in.
+  // Done during render, like the voice above, so no draft save sees ''.
+  if (!country && countries.length > 0) setCountry(countryForLocale(countries));
 
   const joinedPhone = joinPhone(dials.find((d) => d.code === phoneCode)?.dial ?? '', phoneLocal);
 
@@ -305,13 +323,16 @@ export function MeetAssistant({
   // site box are not a site: the server would name the business "My company".
   const siteOk = looksLikeWebsite(website);
   const hasBusiness = business.trim().length > 0 || siteOk;
+  // Text in the optional box that is not a site holds the step even next to a
+  // name: it used to go through as typed, so "hello" reached the server as the site.
+  const siteBad = website.trim().length > 0 && !siteOk;
   // Scoped to the question that has a required answer. The guard used to cover
   // all five, which is invisible going forwards - you cannot reach question 2
   // without answering question 1 - but backing INTO step 1 lands on the LAST
   // question (see `startAt`), so an account saved without an answer would have
   // arrived on question 5 with a permanently dead button and four presses of
   // Back as the only way to find out why.
-  const canAdvance = step > 0 || hasBusiness;
+  const canAdvance = step > 0 || (hasBusiness && !siteBad);
 
   const [preview, setPreview] = useState<string | null>(null);
   const talking = usePreviewPlayer(preview, () => setPreview(null));
@@ -399,6 +420,23 @@ export function MeetAssistant({
     finish();
   }
 
+  // Continue pressed while step 1 waits: say why on screen and to VoiceOver
+  // (a live region is read out on Android only), and focus the field to fix.
+  function blocked() {
+    setSiteTouched(true);
+    if (siteBad) {
+      websiteRef.current?.focus();
+    } else {
+      setAskedEmpty(true);
+      businessRef.current?.focus();
+    }
+    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    // Queued, so the focus move above does not cut the message off.
+    AccessibilityInfo.announceForAccessibilityWithOptions(siteBad ? SITE_ERROR : NAME_NEEDED, {
+      queue: true,
+    });
+  }
+
   useImperativeHandle(backRef, () => ({
     goBack: () => {
       // Mid-celebration the answers are already on their way; stepping back
@@ -418,7 +456,8 @@ export function MeetAssistant({
     const t = setTimeout(() => {
       onSubmit({
         companyName: business.trim(),
-        companyWebsite: website.trim(),
+        // A resumed draft can still hold text that is not a site.
+        companyWebsite: siteOk ? website.trim() : '',
         assistantName: name,
         voiceId,
         voiceGender: gender,
@@ -435,9 +474,12 @@ export function MeetAssistant({
 
   // A failed save has to give the questions back, or the celebrate face sits
   // above an error with no way forward.
-  useEffect(() => {
+  // Done during render, so the celebrate face never commits above the error.
+  const [shownError, setShownError] = useState(error);
+  if (shownError !== error) {
+    setShownError(error);
     if (error) setDone(false);
-  }, [error]);
+  }
 
   if (done) {
     return (
@@ -520,6 +562,11 @@ export function MeetAssistant({
               submitBehavior="submit"
               onSubmitEditing={() => websiteRef.current?.focus()}
             />
+            {askedEmpty && !business.trim() && !website.trim() ? (
+              <Text style={styles.error} accessibilityLiveRegion="polite">
+                {NAME_NEEDED}
+              </Text>
+            ) : null}
 
             {/* Either answer is enough - the web accepts a site on its own and
                 derives the name from the domain - but they are not the same
@@ -553,14 +600,11 @@ export function MeetAssistant({
               // here, so nothing else brings them into view.
               onFocus={() => scroller.current?.scrollToEnd({ animated: true })}
               onBlur={() => setSiteTouched(true)}
-              onSubmitEditing={() => {
-                if (hasBusiness) return advance();
-                businessRef.current?.focus();
-              }}
+              onSubmitEditing={() => (canAdvance ? advance() : blocked())}
             />
-            {siteTouched && !business.trim() && website.trim() && !siteOk ? (
+            {siteTouched && siteBad ? (
               <Text style={styles.error} accessibilityLiveRegion="polite">
-                Enter a web address like example.com, or type the business name above.
+                {SITE_ERROR}
               </Text>
             ) : null}
             <Text style={styles.hint}>Either one is enough.</Text>
@@ -627,7 +671,14 @@ export function MeetAssistant({
         )}
 
         {step === 2 && (
-          <CountryPicker countries={countries} value={country} onPick={setCountry} />
+          // Keyed on the catalogue: a list that lands after this question
+          // opened remounts the picker, so it pins the region just picked.
+          <CountryPicker
+            key={countries.length > 0 ? 'listed' : 'empty'}
+            countries={countries}
+            value={country}
+            onPick={setCountry}
+          />
         )}
 
         {step === 3 && (
@@ -635,7 +686,7 @@ export function MeetAssistant({
             {/* The gender question belongs to the name screen, which is where it
                 is asked. What is left here says what is on screen and offers
                 the way back to the question that decided it. */}
-            <View style={styles.showing}>
+            <View style={[styles.showing, largeText && styles.showingStacked]}>
               <Text style={styles.showingText}>
                 Showing {gender === 'f' ? 'female' : 'male'} voices
               </Text>
@@ -807,11 +858,8 @@ export function MeetAssistant({
           onPress: advance,
           disabled: !canAdvance,
           // The website error waits for blur, and the keyboard can still be up:
-          // a press here shows it, or points to the name box when both are empty.
-          onBlockedPress: () => {
-            setSiteTouched(true);
-            if (!website.trim()) businessRef.current?.focus();
-          },
+          // a press here shows it, or says a name is needed when both are empty.
+          onBlockedPress: blocked,
           busy,
         }}
         onBack={step > 0 ? () => go(step - 1) : undefined}
@@ -836,13 +884,20 @@ export function CountryPicker({
 }) {
   /** Twenty-odd countries is more than a phone can scan. */
   const [query, setQuery] = useState('');
+  // The preselected country (the phone's region) can sit far down the list,
+  // where nobody sees it checked, so it opens at the top. Fixed at mount:
+  // moving a row to the top as it is tapped would make the list jump.
+  const [pinned] = useState(value);
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return countries;
+    if (!q) {
+      const first = countries.find((c) => c.code === pinned);
+      return first ? [first, ...countries.filter((c) => c.code !== pinned)] : countries;
+    }
     return countries.filter(
       (c) => c.name.toLowerCase().includes(q) || c.code.toLowerCase().startsWith(q),
     );
-  }, [countries, query]);
+  }, [countries, query, pinned]);
 
   return (
     <View style={styles.list}>
@@ -1126,6 +1181,7 @@ const styles = StyleSheet.create({
     gap: spacing.md,
     marginBottom: spacing.xs,
   },
+  showingStacked: { flexDirection: 'column', alignItems: 'flex-start' },
   // Shrinks and wraps, so at the accessibility sizes "Change" stays on screen.
   showingText: { ...type.footnote, flexShrink: 1 },
   showingChange: {
